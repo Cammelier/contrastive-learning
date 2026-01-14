@@ -1,0 +1,10 @@
+name: stl10
+root_path: ${Hydra:runtime.cwd}/data
+image_size: 96
+batch_size: ${batch_size}
+num_workers: 4
+num_classes: 10
+augmentantation:
+  color_jitter_strength: 0.5
+  pin_memory: true
+  
