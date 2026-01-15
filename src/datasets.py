@@ -3,7 +3,7 @@ import torchvision.transforms as T
 from torchvision.datasets import STL10
 from torch.utils.data import DataLoader
 
-class ContrastiveTransformatuions:
+class ContrastiveTransformations:
     def __init__(self, size: int, s: float = 0.5):
         color_jitter = T.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
 
@@ -20,8 +20,9 @@ class ContrastiveTransformatuions:
     def __call__(self, x):
         return [self.transform(x), self.transform(x)]
     
-    def get_stl10_dataloader(cfg_data, split: str = 'unlabeled'):
-        contrastive_transform = ContrastiveTransformatuions(
+    def get_stl10_dataloader(cfg, split: str = 'unlabeled'):
+        cfg_data = cfg.data
+        contrastive_transform = ContrastiveTransformations(
             size=cfg_data.size,
             s=cfg_data.augmentation.color_jitter_strength)
         
