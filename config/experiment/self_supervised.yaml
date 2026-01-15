@@ -16,7 +16,7 @@ model:
   loops: 
    contrastive:
     training: 
-      epochs: 100
+      epochs: 1
       early_stopping: 
         patience: 15
         min_delta: 0.0001

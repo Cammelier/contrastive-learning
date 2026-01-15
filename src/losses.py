@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.07):
+    def __init__(self, temperature=0.07,supervised=False):
         super(ContrastiveLoss, self).__init__()
         self.temperature = temperature
 

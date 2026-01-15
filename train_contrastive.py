@@ -1,10 +1,12 @@
+
 import argparse
+import os
 
 
 original_check_help = argparse.ArgumentParser._check_help
 
+
 def patched_check_help(self, action):
-  
     if hasattr(action, 'help') and action.help.__class__.__name__ == 'LazyCompletionHelp':
         action.help = "Shell completion for Hydra"
     return original_check_help(self, action)
@@ -12,23 +14,26 @@ def patched_check_help(self, action):
 
 argparse.ArgumentParser._check_help = patched_check_help
 
+
+
 import hydra 
 import torch 
 import wandb
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
+from tqdm import tqdm 
+
+
 from src.datasets import get_stl10_dataloader
 from src.models import SimCLR
 from src.losses import ContrastiveLoss
-
-
 
 
 @hydra.main(version_base="1.2", config_path="config", config_name="configuratore")
 def main(cfg: DictConfig):
     # 1. Setup path and environment
     root_dir = Path(hydra.utils.get_original_cwd())
-    # NOTA: assicurati che nello yaml sia 'experiment' e non 'experiments'
+   
     ckpt_dir = root_dir / "checkpoints" / cfg.experiment.mode
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -69,15 +74,19 @@ def main(cfg: DictConfig):
         model.train()
         total_loss = 0
 
-        for batch_idx, (imgs, labels) in enumerate(loader):
+        
+        for batch_idx, (imgs, labels) in enumerate(tqdm(loader, desc=f"Epoca {epoch+1}/{cfg.epochs}")):
+            
             x_i, x_j = imgs[0].to(device), imgs[1].to(device)
             labels = labels.to(device)
 
-            # Forward pass
-            _, z_i = model(x_i)
-            _, z_j = model(x_j)
+            #forward pass
+            x_combined = torch.cat([x_i, x_j], dim=0)
+            _, z_combined = model(x_combined)
+            #  features [batch, out_dim]
+            z_i, z_j = torch.split(z_combined, x_i.size(0))
 
-            # Concatenate along the batch dimension
+            # Concatenate along the 'views' dimension: [batch, 2, out_dim]
             features = torch.stack([z_i, z_j], dim=1) 
 
             # Calculate loss 
@@ -91,19 +100,21 @@ def main(cfg: DictConfig):
             total_loss += loss.item()
 
             if batch_idx % 20 == 0:
+                
                 wandb.log({"Batch Loss": loss.item()})
 
-        # Calcolo media a fine epoca (SPOSTATO FUORI dal loop dei batch)
+        
         avg_loss = total_loss / len(loader)
         print(f"Epoch [{epoch+1}/{cfg.epochs}] | Avg Loss: {avg_loss:.4f}")
 
+        
         wandb.log({
             "epoch": epoch + 1,
             "Avg_epoch_loss": avg_loss,
             "learning_rate": optimizer.param_groups[0]['lr']
         })
     
-        # Save checkpoint (SPOSTATO DENTRO il loop delle epoche)
+        # Save checkpoint
         if (epoch + 1) % 10 == 0 or (epoch + 1) == cfg.epochs:
             ckpt_path = ckpt_dir / f"model_epoch_{epoch+1}.pth"
             torch.save({
@@ -115,7 +126,6 @@ def main(cfg: DictConfig):
     
     wandb.finish()
     print("--- Esperimento Terminato ---")
-
 
 if __name__ == "__main__":
     main()
