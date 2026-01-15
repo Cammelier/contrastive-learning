@@ -3,16 +3,17 @@ defaults:
  - model: resnet_simclr
  - _self_
 
-# Global parameters
 seed: 42
 device: "cuda"
 epochs: 100
 learning_rate: 0.0003
 batch_size: 32
 
-experiment_type: "self_supervised"
-temperature: 0.07
+experiment:
+  mode: "self_supervised"
+  supervised: false
+  temperature: 0.07
 
 logger:
   project: "contrastive_learning"
-  group: ${experiment_type}
+  group: ${experiment.mode}
