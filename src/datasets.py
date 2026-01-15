@@ -20,7 +20,7 @@ class ContrastiveTransformations:
     def __call__(self, x):
         return [self.transform(x), self.transform(x)]
     
-    def get_stl10_dataloader(cfg, split: str = 'unlabeled'):
+def get_stl10_dataloader(cfg, split: str = 'unlabeled'):
         cfg_data = cfg.data
         contrastive_transform = ContrastiveTransformations(
             size=cfg_data.size,
