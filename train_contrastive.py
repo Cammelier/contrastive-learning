@@ -3,16 +3,7 @@ import argparse
 import os
 
 
-original_check_help = argparse.ArgumentParser._check_help
 
-
-def patched_check_help(self, action):
-    if hasattr(action, 'help') and action.help.__class__.__name__ == 'LazyCompletionHelp':
-        action.help = "Shell completion for Hydra"
-    return original_check_help(self, action)
-
-
-argparse.ArgumentParser._check_help = patched_check_help
 
 
 
