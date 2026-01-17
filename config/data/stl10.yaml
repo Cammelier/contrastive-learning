@@ -2,7 +2,7 @@ name: stl10
 root_path: ${hydra:runtime.cwd}/data
 size: 96  # ← questo
 batch_size: ${batch_size}
-num_workers: 0
+num_workers: 8
 num_classes: 10
 
 augmentation:

@@ -6,7 +6,7 @@ training:
   dataloader:
     batch_size: ${batch_size}
     shuffle: true
-    num_workers: 0
+    num_workers: 8
     pin_memory: true
   
   early_stopping:
@@ -17,7 +17,7 @@ training:
     dataloader:
       batch_size: ${batch_size}
       shuffle: false
-      num_workers: 0
+      num_workers: 8
       shuffle: false
       pin_memory: true
   
@@ -25,7 +25,7 @@ training:
     dataloader:
       batch_size: ${batch_size}
       shuffle: false
-      num_workers: 0
+      num_workers: 8
       pin_memory: true
   
   mixed_precision: true
