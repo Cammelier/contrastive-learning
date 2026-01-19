@@ -1,4 +1,6 @@
+# config/experiment/supervised.yaml
 mode: "supervised"
-supervised: True
+supervised: true
 temperature: 0.1
 learning_rate: 0.0005
+epochs: 10

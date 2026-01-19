@@ -1,26 +1,12 @@
-# @package _global_
 
-name: "stl10_simclr_baseline"
-experiment_type: "self_supervised"
-
-# Hyperparameters configuration
+mode: "self_supervised"
+supervised: false
 temperature: 0.07
-learning_rate: 0.0003
+learning_rate: 0.03
+epochs:10
 
-model:
-  projection_head:
+
+
+model_config:
   out_dim: 128
   hidden_dim: 512
-
-  # Specific configuration for pre-training
-  loops: 
-   contrastive:
-    training: 
-      epochs: 1
-      early_stopping: 
-        patience: 15
-        min_delta: 0.0001
-     
-data: 
-  augmentation:
-    color_jitter: 1.0
