@@ -4,10 +4,9 @@ import torch.nn.functional as F
 from torchvision.models import resnet18, resnet50
 
 class SimCLR(nn.Module):
-    def __init__(self, base_model: str = 'resnet18', out_dim: int = 128):
+    def __init__(self, base_model: str = 'resnet18', out_dim: int = 128, num_classes: int=None):
         super().__init__()
         
-        # ✅ Supporta diversi backbone
         if base_model == 'resnet18':
             self.backbone = resnet18(weights=None)
         elif base_model == 'resnet50':
@@ -17,7 +16,7 @@ class SimCLR(nn.Module):
 
         dim_mlp = self.backbone.fc.in_features
 
-        # Rimuovi FC layer
+        # Remove FC layer
         self.backbone.fc = nn.Identity()
 
         # Projection head
@@ -26,8 +25,20 @@ class SimCLR(nn.Module):
             nn.ReLU(),
             nn.Linear(dim_mlp, out_dim) 
         )
+        
+        self.num_classes = num_classes 
+        # Classifier head for the supervised accuracy 
+        if num_classes is not None:
+            self.classifier = nn.Linear(dim_mlp, num_classes) 
+        else: 
+            self.classifier = nn.Identity()
 
     def forward(self, x):
         h = self.backbone(x)
-        z = self.projection(h)
-        return h, z
+        
+        if self.num_classes is not None:
+            class_logits = self.classifier(h)
+            return h, class_logits
+        else: 
+            z = self.projection(h)
+            return h, z
