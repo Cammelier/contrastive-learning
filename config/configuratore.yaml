@@ -1,18 +1,15 @@
 defaults: 
  - data: stl10
  - model: resnet_simclr
+ - experiment: self_supervised
  - _self_
 
 seed: 42
 device: "cuda"
 epochs: 1
-learning_rate: 0.0003
+learning_rate: 0.03
 batch_size: 32
 
-experiment:
-  mode: "self_supervised"
-  supervised: false
-  temperature: 0.07
 
 logger:
   project: "contrastive_learning"
