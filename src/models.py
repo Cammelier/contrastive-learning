@@ -40,7 +40,7 @@ class SimCLR(nn.Module):
             if return_features:
                 return h
             if not self.training and self.num_classes is not None:
-            return self.classifier(h)
+                return self.classifier(h)
 
             # training with SupCon
             if self.num_classes is not None:
