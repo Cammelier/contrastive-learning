@@ -15,12 +15,11 @@ class ContrastiveLoss(nn.Module):
         """
 
         device = features.device
-        batch_size = features.shape[0]
-
-        # Normalize features
-        f1, f2 = torch.unbind(features, dim=1)
-        features = torch.cat([f1,f2],dim=0)
         features = F.normalize(features, dim=1)
+
+        full_batch_size = features.shape[0]
+        batch_size = full_batch_size // 2
+
 
         # Create positive mask
         if labels is None:

@@ -22,7 +22,8 @@ class SimCLR(nn.Module):
         # Projection head
         self.projection = nn.Sequential(
             nn.Linear(dim_mlp, dim_mlp),
-            nn.ReLU(),
+            nn.BatchNorm1d(dim_mlp),
+            nn.ReLU(inplace=True),
             nn.Linear(dim_mlp, out_dim) 
         )
         
@@ -33,12 +34,23 @@ class SimCLR(nn.Module):
         else: 
             self.classifier = nn.Identity()
 
-    def forward(self, x):
+        def forward(self, x, return_features=False):
         h = self.backbone(x)
         
+        
+        if return_features:
+            return h
+
+        if not self.training and self.num_classes is not None:
+            return self.classifier(h)
+
+        # training with SupCon
         if self.num_classes is not None:
-            class_logits = self.classifier(h)
-            return h, class_logits
-        else: 
             z = self.projection(h)
-            return h, z
+            z = F.normalize(z, dim=1)
+            class_logits = self.classifier(h)
+            return z, class_logits
+        
+        # Default: Training SimCLR 
+        z = self.projection(h)
+        return F.normalize(z, dim=1)
