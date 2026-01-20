@@ -28,9 +28,11 @@ class ContrastiveLoss(nn.Module):
         else: 
             # Supervised case
             labels = labels.contiguous().view(-1,1)
-            mask = torch.eq(labels, labels.T).float().to(device)
-            mask = mask.repeat(2,2)
-        
+            if labels.shape[0] != features.shape[0]:
+                labels = labels.repeat(2, 1)
+            
+            mask = torch.eq(labels,labels.T).float().to(device)
+            
         # Compute logits
         logits = torch.matmul(features, features.T) / self.temperature
 

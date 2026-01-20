@@ -61,7 +61,7 @@ def run_training(cfg, device, model, ckpt_dir):
             z_i, z_j = torch.split(z_combined, x_i.size(0))
             
             # contrastive loss calculation 
-            loss = criterion(torch.stack([z_i, z_j], dim=1), labels if is_supervised else None)
+            loss = criterion(torch.cat([z_i, z_j], dim=0), labels if is_supervised else None)
             
             optimizer.zero_grad()
             loss.backward()
