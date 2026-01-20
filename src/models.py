@@ -35,22 +35,20 @@ class SimCLR(nn.Module):
             self.classifier = nn.Identity()
 
         def forward(self, x, return_features=False):
-        h = self.backbone(x)
-        
-        
-        if return_features:
-            return h
+            h = self.backbone(x)
 
-        if not self.training and self.num_classes is not None:
+            if return_features:
+                return h
+            if not self.training and self.num_classes is not None:
             return self.classifier(h)
 
-        # training with SupCon
-        if self.num_classes is not None:
-            z = self.projection(h)
-            z = F.normalize(z, dim=1)
-            class_logits = self.classifier(h)
-            return z, class_logits
+            # training with SupCon
+            if self.num_classes is not None:
+                z = self.projection(h)
+                z = F.normalize(z, dim=1)
+                class_logits = self.classifier(h)
+                return z, class_logits
         
-        # Default: Training SimCLR 
-        z = self.projection(h)
-        return F.normalize(z, dim=1)
+            # Default: Training SimCLR 
+            z = self.projection(h)
+            return F.normalize(z, dim=1)
