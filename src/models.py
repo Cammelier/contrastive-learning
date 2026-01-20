@@ -51,4 +51,5 @@ class SimCLR(nn.Module):
         
         # Default: Training SimCLR 
         z = self.projection(h)
-        return F.normalize(z, dim=1)
+        z = F.normalize(z, dim=1)
+        return h, z 
