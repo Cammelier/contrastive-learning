@@ -2,5 +2,5 @@
 mode: "supervised"
 supervised: true
 temperature: 0.1
-learning_rate: 0.15
-epochs: 100
+learning_rate: 0.01
+epochs: 50
