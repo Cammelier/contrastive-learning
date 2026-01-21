@@ -128,11 +128,15 @@ def run_training(cfg, device, model, ckpt_dir):
                 acc = (logits.argmax(1) == labels).float().mean()
                 total_correct += (logits.argmax(1) == labels).sum().item()
                 total_samples += labels.size(0)
-                pbar.set_postfix({'loss': f'{loss.item():.3f}', 'acc': f'{acc.item():.2f}'})
+
+                 current_acc = total_correct / total_samples
+                pbar.set_postfix({'loss': f'{loss.item():.3f}', 'acc': f'{current_acc:.2f}'})
             else:
                 pbar.set_postfix({'loss': f'{loss.item():.3f}'})
         
+        avg_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
         val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg)
+        
         scheduler.step()
 
         # Log Epoc
