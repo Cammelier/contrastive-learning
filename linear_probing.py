@@ -58,7 +58,7 @@ def main(cfg: DictConfig):
     ).to(device)
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    encoder.load_state_dict(checkpoint['model_state_dict'])
+    encoder.load_state_dict(checkpoint['model_state_dict'], strict=False)
     
     # FREEZE encoder - non verrà addestrato
     for param in encoder.parameters():
@@ -105,7 +105,8 @@ def main(cfg: DictConfig):
             
             # Estrai features con encoder frozen
             with torch.no_grad():
-                features, _ = encoder(x)  # h (features), z (projection)
+               features = encoder(x, return_features=True)
+
             
             # Forward attraverso linear classifier
             logits = linear_classifier(features)
@@ -144,7 +145,8 @@ def main(cfg: DictConfig):
                 x = imgs[0].to(device) if isinstance(imgs, list) else imgs.to(device)
                 labels = labels.to(device)
                 
-                features, _ = encoder(x)
+                features = encoder(x, return_features=True)
+
                 logits = linear_classifier(features)
                 loss = criterion(logits, labels)
                 
@@ -192,7 +194,7 @@ def main(cfg: DictConfig):
     with torch.no_grad():
         for imgs, labels in tqdm(test_loader, desc="Final Eval"):
             x = imgs[0].to(device) if isinstance(imgs, list) else imgs.to(device)
-            features, _ = encoder(x)
+            features = encoder(x, return_features=True)
             logits = linear_classifier(features)
             preds = torch.argmax(logits, dim=1)
             
