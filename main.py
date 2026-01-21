@@ -11,6 +11,42 @@ from src.datasets import prepare_loader
 from src.models import SimCLR
 from src.losses import ContrastiveLoss
 
+def run_validation(model, classifier, val_loader, criterion, device, cfg):
+    
+    model.eval()
+    classifier.eval()
+    val_loss, val_correct, val_samples = 0, 0, 0
+    
+    with torch.no_grad():
+        for imgs, labels in val_loader:
+            # Input 
+            if isinstance(imgs, list):
+                x_i, x_j = imgs[0].to(device), imgs[1].to(device)
+            else:
+                x_i = imgs.to(device)
+                x_j = x_i
+            
+            labels = labels.to(device)
+            if cfg.experiment.supervised:
+                labels = labels - 1
+            # 1. Contrastive Loss 
+            x_combined = torch.cat([x_i, x_j], dim=0)
+            h_combined, z_combined = model(x_combined)
+            z_i, z_j = torch.split(z_combined, x_i.size(0))
+            
+            loss = criterion(torch.cat([z_i, z_j], dim=0), labels if cfg.experiment.supervised else None)
+            val_loss += loss.item()
+
+            # 2. Accuracy (Linear Probing online)
+            if labels.min() >= 0:
+                h_i, _ = torch.split(h_combined, x_i.size(0))
+                logits = classifier(h_i) # No detach necessario in eval()
+                val_correct += (logits.argmax(1) == labels).sum().item()
+                val_samples += labels.size(0)
+
+    avg_loss = val_loss / len(val_loader)
+    avg_acc = (val_correct / val_samples) if val_samples > 0 else 0
+    return avg_loss, avg_acc
 
 def run_training(cfg, device, model, ckpt_dir):
     # 1. DataLoader 
@@ -22,6 +58,8 @@ def run_training(cfg, device, model, ckpt_dir):
         temperature=cfg.experiment.temperature,
         supervised=cfg.experiment.supervised
     ).to(device)
+
+    accumlation_steps = cfg.experiment.get("accumlation_steps", 4)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.experiment.learning_rate, weight_decay=1e-4)
 
@@ -39,8 +77,10 @@ def run_training(cfg, device, model, ckpt_dir):
         classifier.train()
         total_loss, total_correct, total_samples = 0, 0, 0
 
+        optimizer.zero_grad()
+
         pbar = tqdm(train_loader, desc=f"Epoca {epoch+1}/{cfg.experiment.epochs}")
-        for imgs, labels in pbar:
+        for i,(imgs, labels) in enumerate(pbar):
             
             if isinstance(imgs, list):
                 x_i, x_j = imgs[0].to(device), imgs[1].to(device)
@@ -62,10 +102,13 @@ def run_training(cfg, device, model, ckpt_dir):
             
             # contrastive loss calculation 
             loss = criterion(torch.cat([z_i, z_j], dim=0), labels if is_supervised else None)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scaled_loss = loss / accumlation_steps
+            scaled_loss.backward()
+           
+            if (i+1) % accumlation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+
             total_loss += loss.item()
 
         
@@ -88,16 +131,18 @@ def run_training(cfg, device, model, ckpt_dir):
                 pbar.set_postfix({'loss': f'{loss.item():.3f}', 'acc': f'{acc.item():.2f}'})
             else:
                 pbar.set_postfix({'loss': f'{loss.item():.3f}'})
-
+        
+        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg)
         scheduler.step()
 
         # Log Epoc
-        avg_acc = (total_correct / total_samples) if total_samples > 0 else 0
         wandb.log({
             "train/loss": total_loss/len(train_loader), 
-            "train/acc": avg_acc, 
-            "epoch": epoch,
-            "lr": optimizer.param_groups[0]['lr'] # Aggiungi questa riga
+            "train/acc": avg_acc,
+            "val/loss": val_loss,
+            "val/acc": val_acc, 
+            "epoch": epoch+1,
+            "lr": optimizer.param_groups[0]['lr'] 
         })
 
     # Save
@@ -125,10 +170,15 @@ def run_testing(cfg, device, model, ckpt_dir):
     with torch.no_grad():
         for imgs, labels in tqdm(test_loader):
             imgs = imgs.to(device)
+
             labels = labels.to(device) - 1
-            h, _ = model(imgs) # imgs is a single tensor not a list 
+
+            h = model(imgs, return_features=True)
+
             logits = classifier(h)
-            correct += (logits.argmax(1) == labels).sum().item()
+            preds = logits.argmax(1)
+            
+            correct += (preds == labels).sum().item()
             total += labels.size(0)
     
     print(f"Accuracy finale sul Test Set: {100 * correct / total:.2f}%")
