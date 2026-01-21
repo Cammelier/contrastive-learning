@@ -9,8 +9,21 @@ class SimCLR(nn.Module):
         
         if base_model == 'resnet18':
             self.backbone = resnet18(weights=None)
+            self.backbone.conv1 = nn.Conv2d(3,
+                                            64,
+                                            kernel_size=3,
+                                            stride=1,
+                                            padding=1,
+                                            bias=False)
+            self.backbone.maxpool = nn.Identity()
         elif base_model == 'resnet50':
             self.backbone = resnet50(weights=None)
+            self.backbone.conv1 = nn.Conv2d(3,
+                                            64,
+                                            kernel_size=3,
+                                            stride=1,
+                                            padding=1,
+                                            bias=False)
         else:
             raise ValueError(f"Backbone {base_model} not supported")
 
@@ -36,9 +49,14 @@ class SimCLR(nn.Module):
 
     def forward(self, x, return_features=False):
         h = self.backbone(x)
+        
+        if len(h.shape) > 2:
+            h = F.adaptive_avg_pool2d(h, (1, 1))
+            h = torch.flatten(h,1)
 
         if return_features:
             return h
+            
         if not self.training and self.num_classes is not None:
             return self.classifier(h)
 
