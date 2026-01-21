@@ -44,8 +44,8 @@ def main(cfg: DictConfig):
     
     # 4. Carica dataloaders (train e test con label)
     print("Loading data...")
-    train_loader = get_stl10_dataloader(cfg, split='train')
-    test_loader = get_stl10_dataloader(cfg, split='test')
+    train_loader = prepare_loader(cfg, split='train')
+    test_loader = prepare_loader(cfg, split='test')
     
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Test samples: {len(test_loader.dataset)}")
