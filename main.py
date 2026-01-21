@@ -129,7 +129,7 @@ def run_training(cfg, device, model, ckpt_dir):
                 total_correct += (logits.argmax(1) == labels).sum().item()
                 total_samples += labels.size(0)
 
-                 current_acc = total_correct / total_samples
+                current_acc = total_correct / total_samples
                 pbar.set_postfix({'loss': f'{loss.item():.3f}', 'acc': f'{current_acc:.2f}'})
             else:
                 pbar.set_postfix({'loss': f'{loss.item():.3f}'})
