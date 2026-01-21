@@ -11,7 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
 from tqdm import tqdm 
 
-from src.datasets import get_stl10_dataloader
+from src.datasets import prepare_loader
 from src.models import SimCLR
 
 
