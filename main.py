@@ -34,8 +34,7 @@ def run_validation(model, classifier, val_loader, criterion, device, cfg):
                 x_j = x_i
             
             labels = labels.to(device)
-            if cfg.experiment.supervised:
-                labels = labels - 1 # Adjust 1-based STL-10 labels to 0-based
+            
             
             # 1. Contrastive Validation Loss 
             x_combined = torch.cat([x_i, x_j], dim=0)
@@ -61,22 +60,20 @@ def run_training(cfg, device, model, ckpt_dir):
     Main training loop with dynamic Gradient Accumulation and Online Linear Probing.
     """
     # 1. Prepare Data Loaders
+    # Se supervised=True carica 'train', altrimenti 'unlabeled' (o 'train+unlabeled' per STL10)
     train_loader = prepare_loader(cfg, split='train' if cfg.experiment.supervised else 'unlabeled')
     val_loader = prepare_loader(cfg, split='val')
 
-    # DYNAMIC ACCUMULATION STEPS: 
-    # Balance GPU memory (6GB) while maintaining large batches for Contrastive Learning.
+    # DYNAMIC ACCUMULATION STEPS
     if cfg.experiment.mode == "self_supervised":
-        target_bs = 256  # SimCLR benefits from very large batches
+        target_bs = 256
     else:
-        target_bs = 128  # Supervised Contrastive (SupCon) works well with medium batches
+        target_bs = 128
     
-    # Calculate steps based on physical batch_size provided in cfg
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
     logger.info(f"Mode: {cfg.experiment.mode}")
-    logger.info(f"Physical Batch: {cfg.batch_size}, Virtual Target: {target_bs}")
-    logger.info(f"Gradient Accumulation Steps: {accumulation_steps}") 
+    logger.info(f"Accumulation Steps: {accumulation_steps}") 
     
     # 2. Criterion, Optimizer & Scheduler
     criterion = ContrastiveLoss(
@@ -88,42 +85,48 @@ def run_training(cfg, device, model, ckpt_dir):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.experiment.epochs)
 
     # 3. Online Linear Classifier (trained on top of frozen features)
-    classifier = nn.Linear(512, 10).to(device)
-    cls_optimizer = torch.optim.Adam(classifier.parameters(), lr=cfg.experiment.learning_rate)
+    # Importante: Questo serve a misurare l'accuracy durante il training contrastivo
+    classifier = nn.Linear(cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'out_dim') else 512, 10).to(device)
+    cls_optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3) # LR separato e fisso spesso è meglio per il linear probe
 
     for epoch in range(cfg.experiment.epochs):
         model.train()
         classifier.train()
-        total_loss, total_correct, total_samples = 0, 0, 0
+        
+        total_loss = 0
+        total_correct = 0
+        total_samples = 0
 
         optimizer.zero_grad()
+        cls_optimizer.zero_grad()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg.experiment.epochs}")
+        
         for i, (imgs, labels) in enumerate(pbar):
             
+            # Setup Immagini
             if isinstance(imgs, list):
                 x_i, x_j = imgs[0].to(device), imgs[1].to(device)
             else: 
                 x_i = imgs.to(device)
-                x_j = x_i 
+                x_j = x_i  # Fallback se non ci sono augmentations
             
             labels = labels.to(device)
-            if cfg.experiment.supervised:
-                labels = labels - 1 
 
+            
+            
             # --- STEP 1: Contrastive Learning (Backbone update) ---
             x_combined = torch.cat([x_i, x_j], dim=0)
             h_combined, z_combined = model(x_combined)
             z_i, z_j = torch.split(z_combined, x_i.size(0))
             
-            # Loss calculation
+            # Calcolo Loss Contrastiva
+            # Se supervised=True, usa le label per la SupCon Loss
             loss = criterion(torch.cat([z_i, z_j], dim=0), labels if cfg.experiment.supervised else None)
             
-            # Scaled loss for gradient accumulation
             scaled_loss = loss / accumulation_steps
             scaled_loss.backward()
            
-            # Optimizer step every 'accumulation_steps' iterations
             if (i + 1) % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
@@ -131,9 +134,17 @@ def run_training(cfg, device, model, ckpt_dir):
             total_loss += loss.item()
 
             # --- STEP 2: Online Linear Evaluation (Classifier update) ---
-            if labels.min() >= 0:
-                # Detach features to ensure backbone weights are not updated here
+            # Calcoliamo l'accuracy SE abbiamo label valide (cioè non -1)
+            # In modalità supervised le label sono sempre valide.
+            
+            has_valid_labels = (labels.min() >= 0)
+            current_acc = 0.0
+
+            if has_valid_labels:
+                # Stacchiamo le feature (detach) perché qui alleniamo SOLO il classificatore
+                # Non vogliamo che il gradiente del classificatore sporchi il backbone contrastivo
                 h_i = h_combined[:x_i.size(0)].detach() 
+                
                 logits = classifier(h_i)
                 cls_loss = F.cross_entropy(logits, labels)
                 
@@ -141,16 +152,25 @@ def run_training(cfg, device, model, ckpt_dir):
                 cls_loss.backward()
                 cls_optimizer.step()
 
-                # Accuracy metrics
-                total_correct += (logits.argmax(1) == labels).sum().item()
+                # Calcolo Accuracy
+                preds = logits.argmax(dim=1)
+                correct = (preds == labels).sum().item()
+                total_correct += correct
                 total_samples += labels.size(0)
                 
                 current_acc = total_correct / total_samples
-                pbar.set_postfix({'loss': f'{loss.item():.3f}', 'acc': f'{current_acc:.2f}'})
-            else:
-                pbar.set_postfix({'loss': f'{loss.item():.3f}'})
+
+            # --- UPDATE PROGRESS BAR ---
+            # Costruiamo il dizionario per la barra
+            postfix_dict = {'loss': f'{loss.item():.3f}'}
+            
+            # Mostriamo l'acc se abbiamo processato almeno un campione valido
+            if total_samples > 0:
+                postfix_dict['acc'] = f'{current_acc:.2%}'
+            
+            pbar.set_postfix(postfix_dict)
         
-        # Epoch-level validation and logging
+        # Fine Epoca: Validation
         avg_train_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
         val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg)
         
@@ -192,7 +212,7 @@ def run_testing(cfg, device, model, ckpt_dir):
     with torch.no_grad():
         for imgs, labels in tqdm(test_loader, desc="Evaluating Test Set"):
             imgs = imgs.to(device)
-            labels = labels.to(device) - 1
+            labels = labels.to(device) 
 
             # Extract features only
             h = model(imgs, return_features=True)

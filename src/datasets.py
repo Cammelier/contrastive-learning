@@ -73,6 +73,8 @@ def prepare_loader(cfg, split: str = 'train'):
         train_len = int(len(full_train) * 0.9)
         val_len = len(full_train) - train_len
 
+        generator = torch.Generator().manual_seed(cfg.seed)
+
         # Use a fixed seed for reproducibility of the split
         _, val_dataset = random_split(full_train, [train_len, val_len], 
                                      generator=torch.Generator().manual_seed(cfg.seed))
