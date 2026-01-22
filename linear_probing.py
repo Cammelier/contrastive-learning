@@ -22,18 +22,23 @@ def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     
-    # 2. Carica checkpoint del modello pretrained
+        # 2. Carica checkpoint del modello pretrained
     checkpoint_path = cfg.get('checkpoint_path', None)
     if checkpoint_path is None and cfg.auto_last_checkpoint:
-        # Usa l'ultimo checkpoint disponibile
         ckpt_dir = root_dir / "checkpoints" / cfg.experiment.mode
-        checkpoints = list(ckpt_dir.glob("*.pth"))
+        
+        checkpoints = [p for p in ckpt_dir.glob("*.pth") if "probe" not in p.name]
+        
         if checkpoints:
             checkpoint_path = max(checkpoints, key=lambda p: p.stat().st_mtime)
         else:
             raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
     
-    print(f"Loading checkpoint: {checkpoint_path}")
+    
+    print(f"\n[DEBUG] Sto caricando il file: {checkpoint_path.resolve()}")
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
     
     # 3. Wandb per linear probing
     wandb.init(
