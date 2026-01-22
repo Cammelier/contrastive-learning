@@ -17,9 +17,7 @@ from src.datasets import prepare_loader
 from src.models import SimCLR
 
 # --- GPU TRANSFORMS FOR LINEAR PROBING ---
-# Per il Linear Probe si usano augmentation "Standard Supervised" (molto più leggere di SimCLR)
-# Train: RandomResizedCrop + Flip + Normalize
-# Test: Normalize (e basta)
+
 def get_linear_probe_transforms(device):
     train_aug = nn.Sequential(
         K.RandomResizedCrop(size=(96, 96), scale=(0.08, 1.0)), # Standard supervised crop
