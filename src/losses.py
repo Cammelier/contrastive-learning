@@ -1,57 +1,37 @@
-import torch 
-import torch.nn as nn
-import torch.nn.functional as F
+def forward(self, features, labels=None):
+    device = features.device
+    features = F.normalize(features, dim=1)
 
-class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.07,supervised=False):
-        super(ContrastiveLoss, self).__init__()
-        self.temperature = temperature
+    logits = torch.matmul(features, features.T) / self.temperature
+    
+    logits_max, _ = torch.max(logits, dim=1, keepdim=True)
+    logits = logits - logits_max.detach()
 
-    def forward(self, features, labels=None):
-        """
-        Args: 
-            features: Tensor of shape (batch_size, feature_dim)
-            labels: Optional Tensor of shape (batch_size,) containing class labels
-        """
+    batch_size = features.shape[0]
+    logits_mask = torch.ones_like(logits) - torch.eye(batch_size, device=device)
 
-        device = features.device
-        features = F.normalize(features, dim=1)
-
-        full_batch_size = features.shape[0]
-        batch_size = full_batch_size // 2
-
-
-        # Create positive mask
-        if labels is None:
-            # Self-supervised case
-            mask = torch.eye(batch_size, device=device).repeat(2,2)
-        else: 
-            # Supervised case
-            labels = labels.contiguous().view(-1,1)
-            if labels.shape[0] != features.shape[0]:
-                labels = labels.repeat(2, 1)
-            
-            mask = torch.eq(labels,labels.T).float().to(device)
-            
-        # Compute logits
-        logits = torch.matmul(features, features.T) / self.temperature
-
-        logits_max, _ = torch.max(logits, dim=1, keepdim=True)
-        logits = logits - logits_max.detach()
-
-        # auto-similarity esclusion
-        logits_mask = torch.scatter(
-            torch.ones_like(mask), 
-            1, 
-            torch.arange(batch_size*2,device=device).view(-1,1),0 
-        )
+    if labels is None:
+        # SELF-SUPERVISED (SimCLR)
+        half_batch = batch_size // 2
+        mask = torch.zeros_like(logits)
+        mask[torch.arange(half_batch), torch.arange(half_batch, batch_size)] = 1
+        mask[torch.arange(half_batch, batch_size), torch.arange(half_batch)] = 1
+    else:
+        #  SUPERVISED (SupCon)
+        labels = labels.view(-1, 1)
+        
+        mask = torch.eq(labels, labels.T).float().to(device)
+        
         mask = mask * logits_mask
 
-        # Compute log_prob
-        exp_logits = torch.exp(logits) * logits_mask
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-06)
+ 
+    exp_logits = torch.exp(logits) * logits_mask
+    log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-06)
 
-        # Average for positive pairs
-        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-06)
+   
+    pos_counts = mask.sum(1)
+    pos_counts[pos_counts == 0] = 1 
+    
+    mean_log_prob_pos = (mask * log_prob).sum(1) / pos_counts
 
-        return -mean_log_prob_pos.mean()
+    return -mean_log_prob_pos.mean()
