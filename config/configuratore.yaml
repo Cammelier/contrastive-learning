@@ -10,6 +10,8 @@ batch_size: 32
 num_workers: 4
 stage: all 
 
+checkpoint_path: null
+auto_last_checkpoint: true
 
 logger:
   project: "contrastive_learning"

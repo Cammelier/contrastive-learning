@@ -24,13 +24,14 @@ def main(cfg: DictConfig):
     
     # 2. Carica checkpoint del modello pretrained
     checkpoint_path = cfg.get('checkpoint_path', None)
-    if checkpoint_path is None:
+    if checkpoint_path is None and cfg.auto_last_checkpoint:
         # Usa l'ultimo checkpoint disponibile
         ckpt_dir = root_dir / "checkpoints" / cfg.experiment.mode
-        checkpoints = list(ckpt_dir.glob("model_epoch_*.pth"))
-        if not checkpoints:
+        checkpoints = list(ckpt_dir.glob("*.pth"))
+        if checkpoints:
+            checkpoint_path = max(checkpoints, key=lambda p: p.stat().st_mtime)
+        else:
             raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
-        checkpoint_path = max(checkpoints, key=lambda p: int(p.stem.split('_')[-1]))
     
     print(f"Loading checkpoint: {checkpoint_path}")
     
