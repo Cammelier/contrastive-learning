@@ -1,12 +1,14 @@
 """
 Linear Probing per valutare le rappresentazioni apprese dal contrastive learning.
 Freeze l'encoder e addestra solo un linear classifier.
+OPTIMIZED: GPU Transforms + Mixed Precision (Tesla T4 ready)
 """
 
 import hydra 
 import torch 
 import torch.nn as nn
 import wandb
+import kornia.augmentation as K
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
 from tqdm import tqdm 
@@ -14,6 +16,26 @@ from tqdm import tqdm
 from src.datasets import prepare_loader
 from src.models import SimCLR
 
+# --- GPU TRANSFORMS FOR LINEAR PROBING ---
+# Per il Linear Probe si usano augmentation "Standard Supervised" (molto più leggere di SimCLR)
+# Train: RandomResizedCrop + Flip + Normalize
+# Test: Normalize (e basta)
+def get_linear_probe_transforms(device):
+    train_aug = nn.Sequential(
+        K.RandomResizedCrop(size=(96, 96), scale=(0.08, 1.0)), # Standard supervised crop
+        K.RandomHorizontalFlip(p=0.5),
+        K.Normalize(mean=torch.tensor([0.4914, 0.4822, 0.4465]), 
+                    std=torch.tensor([0.247, 0.243, 0.261]))
+    ).to(device)
+
+    test_aug = nn.Sequential(
+        # In test usually we just CenterCrop or Resize, but for 96x96 we often just Normalize
+        # If your images are bigger, add K.CenterCrop((96,96)) here
+        K.Normalize(mean=torch.tensor([0.4914, 0.4822, 0.4465]), 
+                    std=torch.tensor([0.247, 0.243, 0.261]))
+    ).to(device)
+    
+    return train_aug, test_aug
 
 @hydra.main(version_base="1.2", config_path="config", config_name="configuratore")
 def main(cfg: DictConfig):
@@ -22,11 +44,17 @@ def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     
-        # 2. Carica checkpoint del modello pretrained
+    # Performance Tuning
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+    
+    # 2. Carica checkpoint del modello pretrained
     checkpoint_path = cfg.get('checkpoint_path', None)
+    
+    # Auto-find logic
     if checkpoint_path is None and cfg.auto_last_checkpoint:
         ckpt_dir = root_dir / "checkpoints" / cfg.experiment.mode
-        
+        # Exclude existing probe checkpoints to avoid confusion
         checkpoints = [p for p in ckpt_dir.glob("*.pth") if "probe" not in p.name]
         
         if checkpoints:
@@ -34,27 +62,24 @@ def main(cfg: DictConfig):
         else:
             raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
     
-    
     print(f"\n[DEBUG] Sto caricando il file: {checkpoint_path.resolve()}")
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    
-    # 3. Wandb per linear probing
+    # 3. Wandb setup
     wandb.init(
         project=cfg.logger.project,
         group=f"{cfg.experiment.mode}_linear_probing",
-        name=f"linear_probe_seed{cfg.seed}",
+        name=f"probe_{cfg.model.backbone}_seed{cfg.seed}",
         config=OmegaConf.to_container(cfg, resolve=True)
     )
     
-    # 4. Carica dataloaders (train e test con label)
+    # 4. Carica dataloaders
+    # NOTA: Assumiamo che prepare_loader restituisca immagini "pulite" (solo ToTensor)
     print("Loading data...")
     train_loader = prepare_loader(cfg, split='train')
     test_loader = prepare_loader(cfg, split='test')
     
-    print(f"Train samples: {len(train_loader.dataset)}")
-    print(f"Test samples: {len(test_loader.dataset)}")
+    # Setup GPU Transforms
+    train_aug, test_aug = get_linear_probe_transforms(device)
     
     # 5. Carica encoder pretrained e FREEZALO
     print("Loading pretrained encoder...")
@@ -64,7 +89,12 @@ def main(cfg: DictConfig):
     ).to(device)
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    encoder.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    
+    # Load weights (handle potential DataParallel keys if present)
+    state_dict = checkpoint['model_state_dict']
+    # if 'module.' in list(state_dict.keys())[0]: ... logic to remove module. prefix if needed
+    
+    encoder.load_state_dict(state_dict, strict=False)
     
     # FREEZE encoder - non verrà addestrato
     for param in encoder.parameters():
@@ -73,21 +103,29 @@ def main(cfg: DictConfig):
     
     print("✓ Encoder frozen (no gradient updates)")
     
-    # 6. Linear classifier (solo questo verrà addestrato)
-    feature_dim = 512  # ResNet18
+    # 6. Linear classifier
+    # Calculate feature dim automatically based on backbone
+    if cfg.model.backbone == 'resnet18':
+        feature_dim = 512
+    elif cfg.model.backbone == 'resnet50':
+        feature_dim = 2048
+    else:
+        feature_dim = 512 # Fallback
+        
     num_classes = cfg.data.num_classes
-    
     linear_classifier = nn.Linear(feature_dim, num_classes).to(device)
     
     print(f"Linear classifier: {feature_dim} -> {num_classes}")
-    print(f"Trainable parameters: {sum(p.numel() for p in linear_classifier.parameters())}")
     
-    # 7. Optimizer e loss (solo per classifier)
+    # 7. Optimizer e Loss
     optimizer = torch.optim.Adam(
         linear_classifier.parameters(),
         lr=cfg.get('linear_probe_lr', 0.001)
     )
     criterion = nn.CrossEntropyLoss()
+    
+    # SCALER for Mixed Precision
+    scaler = torch.cuda.amp.GradScaler()
     
     # 8. Training loop
     best_test_acc = 0.0
@@ -105,23 +143,34 @@ def main(cfg: DictConfig):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{linear_probe_epochs}")
         
         for imgs, labels in pbar:
-            # Usa solo la prima view (non serve contrastive)
-            x = imgs[0].to(device) if isinstance(imgs, list) else imgs.to(device)
-            labels = labels.to(device)
-            
-            # Estrai features con encoder frozen
-            with torch.no_grad():
-               features = encoder(x, return_features=True)
+            # Move to GPU
+            imgs = imgs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
+            # Handle list input (if coming from Contrastive Dataset)
+            if isinstance(imgs, list):
+                imgs = imgs[0] # Take first view
+                
+            # --- GPU AUGMENTATION (Train) ---
+            # Apply crop/flip/normalize on GPU
+            with torch.no_grad():
+                imgs = train_aug(imgs)
             
-            # Forward attraverso linear classifier
-            logits = linear_classifier(features)
-            loss = criterion(logits, labels)
+            # --- FORWARD PASS (Mixed Precision) ---
+            with torch.cuda.amp.autocast():
+                # Extract features (No grad for encoder)
+                with torch.no_grad():
+                    features = encoder(imgs, return_features=True)
+                
+                # Forward classifier
+                logits = linear_classifier(features)
+                loss = criterion(logits, labels)
             
-            # Backward (solo classifier)
+            # --- BACKWARD (Scaler) ---
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             # Metrics
             train_loss += loss.item()
@@ -131,12 +180,8 @@ def main(cfg: DictConfig):
             
             # Update progress bar
             current_acc = train_correct / train_total
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{current_acc:.4f}'
-            })
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{current_acc:.4f}'})
         
-        # Train epoch metrics
         avg_train_loss = train_loss / len(train_loader)
         train_accuracy = train_correct / train_total
         
@@ -148,13 +193,20 @@ def main(cfg: DictConfig):
         
         with torch.no_grad():
             for imgs, labels in tqdm(test_loader, desc="Testing", leave=False):
-                x = imgs[0].to(device) if isinstance(imgs, list) else imgs.to(device)
-                labels = labels.to(device)
-                
-                features = encoder(x, return_features=True)
+                imgs = imgs.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
 
-                logits = linear_classifier(features)
-                loss = criterion(logits, labels)
+                if isinstance(imgs, list):
+                    imgs = imgs[0]
+                
+                # --- GPU AUGMENTATION (Test) ---
+                # Normalize only
+                imgs = test_aug(imgs)
+                
+                with torch.cuda.amp.autocast():
+                    features = encoder(imgs, return_features=True)
+                    logits = linear_classifier(features)
+                    loss = criterion(logits, labels)
                 
                 test_loss += loss.item()
                 preds = torch.argmax(logits, dim=1)
@@ -164,7 +216,7 @@ def main(cfg: DictConfig):
         avg_test_loss = test_loss / len(test_loader)
         test_accuracy = test_correct / test_total
         
-        # Log to wandb
+        # Log & Save
         wandb.log({
             "epoch": epoch + 1,
             "train/loss": avg_train_loss,
@@ -173,24 +225,20 @@ def main(cfg: DictConfig):
             "test/accuracy": test_accuracy,
         })
         
-        # Print results
         print(f"Epoch [{epoch+1}/{linear_probe_epochs}] | "
-              f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_accuracy:.4f} | "
-              f"Test Loss: {avg_test_loss:.4f} | Test Acc: {test_accuracy:.4f}")
+              f"Train Acc: {train_accuracy:.4f} | "
+              f"Test Acc: {test_accuracy:.4f}")
         
-        # Save best model
         if test_accuracy > best_test_acc:
             best_test_acc = test_accuracy
             best_model_path = root_dir / "checkpoints" / cfg.experiment.mode / "best_linear_probe.pth"
             torch.save({
                 'epoch': epoch + 1,
                 'classifier_state_dict': linear_classifier.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
                 'test_accuracy': test_accuracy,
             }, best_model_path)
-            print(f"  ✓ New best accuracy: {best_test_acc:.4f}")
     
-    # Final evaluation con confusion matrix
+    # --- Final Evaluation ---
     print(f"\n--- Final Evaluation ---")
     linear_classifier.eval()
     
@@ -199,45 +247,42 @@ def main(cfg: DictConfig):
     
     with torch.no_grad():
         for imgs, labels in tqdm(test_loader, desc="Final Eval"):
-            x = imgs[0].to(device) if isinstance(imgs, list) else imgs.to(device)
-            features = encoder(x, return_features=True)
-            logits = linear_classifier(features)
-            preds = torch.argmax(logits, dim=1)
+            imgs = imgs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            if isinstance(imgs, list): imgs = imgs[0]
             
+            imgs = test_aug(imgs) # Normalize
+            
+            with torch.cuda.amp.autocast():
+                features = encoder(imgs, return_features=True)
+                logits = linear_classifier(features)
+            
+            preds = torch.argmax(logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
-    # Per-class accuracy
-    from sklearn.metrics import confusion_matrix, classification_report
+    # Per-class accuracy & Confusion Matrix
+    from sklearn.metrics import confusion_matrix
     import numpy as np
+    import matplotlib.pyplot as plt
+    import seaborn as sns
     
     cm = confusion_matrix(all_labels, all_preds)
     per_class_acc = cm.diagonal() / cm.sum(axis=1)
     
     print(f"\nBest Test Accuracy: {best_test_acc:.4f}")
-    print(f"\nPer-class Accuracy:")
-    for i, acc in enumerate(per_class_acc):
-        print(f"  Class {i}: {acc:.4f}")
-    
-    # Log confusion matrix to wandb
-    import matplotlib.pyplot as plt
-    import seaborn as sns
     
     fig, ax = plt.subplots(figsize=(10, 8))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-    ax.set_xlabel('Predicted')
-    ax.set_ylabel('True')
     ax.set_title(f'Confusion Matrix (Acc: {best_test_acc:.4f})')
     
     wandb.log({
         "final/best_test_accuracy": best_test_acc,
         "final/confusion_matrix": wandb.Image(fig),
-        "final/mean_per_class_acc": np.mean(per_class_acc)
     })
     
     plt.close()
     wandb.finish()
 
-
 if __name__ == "__main__":
-    main() 
+    main()

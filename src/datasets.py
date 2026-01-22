@@ -14,13 +14,7 @@ class ContrastiveTransformations:
         color_jitter = T.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
 
         self.transform = T.Compose([
-            T.RandomResizedCrop(size=size),
-            T.RandomHorizontalFlip(p=0.5),
-            T.RandomApply([color_jitter], p=0.8),
-            T.RandomGrayscale(p=0.2),
-            T.GaussianBlur(kernel_size=int(0.1 * size) * 2 + 1, sigma=(0.1, 2.0)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.247, 0.243, 0.261])
+            T.ToTensor()
         ])
 
     def __call__(self, x):
