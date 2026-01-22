@@ -143,6 +143,9 @@ def run_training(cfg, device, model, ckpt_dir):
             # --- INPUT HANDLING & GPU TRANSFER ---
             # Move raw images to GPU immediately. 
             # non_blocking=True allows async transfer while GPU is busy.
+            if isinstance(imgs, list):
+                imgs = imgs[0]
+
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
