@@ -158,7 +158,7 @@ def main(cfg: DictConfig):
                 imgs = train_aug(imgs)
             
             # --- FORWARD PASS (Mixed Precision) ---
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type=device.type):
                 # Extract features (No grad for encoder)
                 with torch.no_grad():
                     features = encoder(imgs, return_features=True)
