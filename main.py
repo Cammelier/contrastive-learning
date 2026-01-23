@@ -98,9 +98,9 @@ def run_training(cfg, device, model, ckpt_dir):
 
     # DYNAMIC ACCUMULATION STEPS
     if cfg.experiment.mode == "self_supervised":
-        target_bs = 1024
+        target_bs = 512
     else:
-        target_bs = 128
+        target_bs = 512
     
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
