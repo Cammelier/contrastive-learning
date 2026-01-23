@@ -122,6 +122,7 @@ def main(cfg: DictConfig):
         lr=cfg.get('linear_probe_lr', 0.0003)
         weight_decay=1e-4
     )
+
     criterion = nn.CrossEntropyLoss()
     
     # SCALER for Mixed Precision
