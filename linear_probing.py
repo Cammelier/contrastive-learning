@@ -204,7 +204,7 @@ def main(cfg: DictConfig):
                 # Normalize only
                 imgs = test_aug(imgs)
                 
-                with torch.amp.autocast(device_type=device.tpye):
+                with torch.amp.autocast(device_type=device.type):
                     features = encoder(imgs, return_features=True)
                     logits = linear_classifier(features)
                     loss = criterion(logits, labels)
