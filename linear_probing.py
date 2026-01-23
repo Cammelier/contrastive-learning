@@ -141,13 +141,15 @@ def main(cfg: DictConfig):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{linear_probe_epochs}")
         
         for imgs, labels in pbar:
-            # Move to GPU
-            imgs = imgs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
 
             # Handle list input (if coming from Contrastive Dataset)
             if isinstance(imgs, list):
                 imgs = imgs[0] # Take first view
+                
+            # Move to GPU
+            imgs = imgs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
                 
             # --- GPU AUGMENTATION (Train) ---
             # Apply crop/flip/normalize on GPU
