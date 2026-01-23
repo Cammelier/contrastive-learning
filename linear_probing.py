@@ -119,7 +119,7 @@ def main(cfg: DictConfig):
     # 7. Optimizer e Loss
     optimizer = torch.optim.Adam(
         linear_classifier.parameters(),
-        lr=cfg.get('linear_probe_lr', 0.0003)
+        lr=cfg.get('linear_probe_lr', 0.0003),
         weight_decay=1e-4
     )
 
