@@ -60,7 +60,7 @@ def main(cfg: DictConfig):
         else:
             raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
     
-    print(f"\n[DEBUG] Sto caricando il file: {checkpoint_path.resolve()}")
+    
     
     # 3. Wandb setup
     wandb.init(
