@@ -62,7 +62,7 @@ def run_validation(model, classifier, val_loader, criterion, device, cfg, val_tr
             
             # --- MIXED PRECISION CONTEXT ---
             # Even in validation, Autocast saves memory and speeds up inference on T4
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast():
                 # 1. Contrastive Validation Loss 
                 x_combined = torch.cat([x_i, x_j], dim=0)
                 h_combined, z_combined = model(x_combined)
@@ -118,7 +118,7 @@ def run_training(cfg, device, model, ckpt_dir):
 
     # --- MIXED PRECISION SCALER ---
     # Essential for Tesla T4 to run efficiently in FP16
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
 
     # 3. Online Linear Classifier (trained on top of frozen features)
     # This monitors representation quality during training
@@ -159,7 +159,7 @@ def run_training(cfg, device, model, ckpt_dir):
             
             # --- STEP 1: Contrastive Learning (Backbone update) ---
             # Enable Mixed Precision for the forward pass
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast():
                 x_combined = torch.cat([x_i, x_j], dim=0)
                 h_combined, z_combined = model(x_combined)
                 z_i, z_j = torch.split(z_combined, x_i.size(0))
@@ -189,7 +189,7 @@ def run_training(cfg, device, model, ckpt_dir):
 
             if has_valid_labels:
                 # Use Autocast here as well for speed
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast():
                     # Detach features! We train ONLY the classifier here.
                     # We don't want classifier gradients affecting the backbone.
                     h_i = h_combined[:x_i.size(0)].detach() 
@@ -282,7 +282,7 @@ def run_testing(cfg, device, model, ckpt_dir):
 
             # --- MIXED PRECISION INFERENCE ---
             # Faster inference on T4
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast():
                 # Extract features only
                 h = model(imgs, return_features=True)
                 logits = classifier(h)
