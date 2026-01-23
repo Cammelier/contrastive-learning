@@ -20,20 +20,21 @@ from src.models import SimCLR
 
 def get_linear_probe_transforms(device):
     train_aug = nn.Sequential(
-        K.RandomResizedCrop(size=(96, 96), scale=(0.08, 1.0)), # Standard supervised crop
+        
+        K.RandomResizedCrop(size=(96, 96), scale=(0.5, 1.0)), 
         K.RandomHorizontalFlip(p=0.5),
         K.Normalize(mean=torch.tensor([0.4914, 0.4822, 0.4465]), 
                     std=torch.tensor([0.247, 0.243, 0.261]))
     ).to(device)
 
     test_aug = nn.Sequential(
-        # In test usually we just CenterCrop or Resize, but for 96x96 we often just Normalize
-        # If your images are bigger, add K.CenterCrop((96,96)) here
+        
         K.Normalize(mean=torch.tensor([0.4914, 0.4822, 0.4465]), 
                     std=torch.tensor([0.247, 0.243, 0.261]))
     ).to(device)
     
     return train_aug, test_aug
+
 
 @hydra.main(version_base="1.2", config_path="config", config_name="configuratore")
 def main(cfg: DictConfig):
@@ -145,7 +146,7 @@ def main(cfg: DictConfig):
             # Handle list input (if coming from Contrastive Dataset)
             if isinstance(imgs, list):
                 imgs = imgs[0] # Take first view
-                
+
             # Move to GPU
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -203,7 +204,7 @@ def main(cfg: DictConfig):
                 # Normalize only
                 imgs = test_aug(imgs)
                 
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast(device_type=device.tpye):
                     features = encoder(imgs, return_features=True)
                     logits = linear_classifier(features)
                     loss = criterion(logits, labels)
