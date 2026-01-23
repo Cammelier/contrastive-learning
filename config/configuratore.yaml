@@ -6,7 +6,7 @@ defaults:
 
 seed: 42
 device: "cuda"
-epochs: 20
+epochs: 10
 batch_size: 32
 num_workers: 4
 stage: all
