@@ -62,7 +62,7 @@ def run_validation(model, classifier, val_loader, criterion, device, cfg, val_tr
             
             # --- MIXED PRECISION CONTEXT ---
             # Even in validation, Autocast saves memory and speeds up inference on T4
-            with torch.amp.autocast():
+            with torch.amp.autocast(device):
                 # 1. Contrastive Validation Loss 
                 x_combined = torch.cat([x_i, x_j], dim=0)
                 h_combined, z_combined = model(x_combined)
@@ -159,7 +159,7 @@ def run_training(cfg, device, model, ckpt_dir):
             
             # --- STEP 1: Contrastive Learning (Backbone update) ---
             # Enable Mixed Precision for the forward pass
-            with torch.amp.autocast():
+            with torch.amp.autocast(device):
                 x_combined = torch.cat([x_i, x_j], dim=0)
                 h_combined, z_combined = model(x_combined)
                 z_i, z_j = torch.split(z_combined, x_i.size(0))
