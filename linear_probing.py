@@ -123,7 +123,7 @@ def main(cfg: DictConfig):
     criterion = nn.CrossEntropyLoss()
     
     # SCALER for Mixed Precision
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
     
     # 8. Training loop
     best_test_acc = 0.0
