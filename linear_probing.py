@@ -119,7 +119,8 @@ def main(cfg: DictConfig):
     # 7. Optimizer e Loss
     optimizer = torch.optim.Adam(
         linear_classifier.parameters(),
-        lr=cfg.get('linear_probe_lr', 0.001)
+        lr=cfg.get('linear_probe_lr', 0.0003)
+        weight_decay=1e-4
     )
     criterion = nn.CrossEntropyLoss()
     
@@ -194,11 +195,14 @@ def main(cfg: DictConfig):
         
         with torch.no_grad():
             for imgs, labels in tqdm(test_loader, desc="Testing", leave=False):
-                imgs = imgs.to(device, non_blocking=True)
-                labels = labels.to(device, non_blocking=True)
 
                 if isinstance(imgs, list):
                     imgs = imgs[0]
+                    
+                imgs = imgs.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+
+                
                 
                 # --- GPU AUGMENTATION (Test) ---
                 # Normalize only
