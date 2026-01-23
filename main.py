@@ -323,9 +323,9 @@ def main(cfg: DictConfig):
     # Build Model
     model = SimCLR(base_model=cfg.model.backbone, out_dim=cfg.model.out_dim).to(device)
 
-    #if torch.cuda.device_count() > 1:
-     #   logger.info(f"🔥 ATTIVAZIONE MULTI-GPU: Trovate {torch.cuda.device_count()} GPU!")
-      #  model = nn.DataParallel(model)
+    if torch.cuda.device_count() > 1:
+        logger.info(f"🔥 ATTIVAZIONE MULTI-GPU: Trovate {torch.cuda.device_count()} GPU!")
+        model = nn.DataParallel(model)
         
     # Execution Stages
     stage = cfg.get("stage", "all")
