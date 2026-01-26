@@ -1,7 +1,7 @@
 name: contrastive_loop
 
 training: 
-  epochs: 20
+  epochs: 30
 
   dataloader:
     batch_size: ${batch_size}
