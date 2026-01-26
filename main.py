@@ -98,9 +98,9 @@ def run_training(cfg, device, model, ckpt_dir):
 
     # DYNAMIC ACCUMULATION STEPS
     if cfg.experiment.mode == "self_supervised":
-        target_bs = 512
+        target_bs = 1024
     else:
-        target_bs = 512
+        target_bs = 1024
     
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
@@ -141,10 +141,6 @@ def run_training(cfg, device, model, ckpt_dir):
         for i, (imgs, labels) in enumerate(pbar):
             
             # --- INPUT HANDLING & GPU TRANSFER ---
-            # Move raw images to GPU immediately. 
-            # non_blocking=True allows async transfer while GPU is busy.
-            if isinstance(imgs, list):
-                imgs = imgs[0]
 
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)

@@ -20,7 +20,6 @@ from src.models import SimCLR
 
 def get_linear_probe_transforms(device):
     train_aug = nn.Sequential(
-        
         K.RandomResizedCrop(size=(96, 96), scale=(0.5, 1.0)), 
         K.RandomHorizontalFlip(p=0.5),
         K.Normalize(mean=torch.tensor([0.4914, 0.4822, 0.4465]), 
@@ -259,7 +258,7 @@ def main(cfg: DictConfig):
             
             imgs = test_aug(imgs) # Normalize
             
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type=device.type):
                 features = encoder(imgs, return_features=True)
                 logits = linear_classifier(features)
             

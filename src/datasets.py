@@ -44,10 +44,9 @@ def prepare_loader(cfg, split: str = 'train'):
         # If we are doing any form of Contrastive Learning (Self-Supervised or Supervised),
         # we NEED the double view to avoid loss collapse (diagonal = 1.0)
         if cfg.experiment.mode in ['self_supervised', 'supervised']:
-            transform = ContrastiveTransformations(
-                size=cfg_data.size,
-                s=cfg_data.augmentation.color_jitter_strength
-            )
+            transform = T.Compose([
+        T.ToTensor(), # Carica solo l'immagine base
+            ])
         else:
             # Standard supervised case (e.g., standard Cross-Entropy)
             transform = T.Compose([
