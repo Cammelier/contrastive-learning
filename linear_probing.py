@@ -51,7 +51,7 @@ def main(cfg: DictConfig):
     checkpoint_path = cfg.get('checkpoint_path', None)
     
     # Auto-find logic
-    if checkpoint_path is None and cfg.auto_last_checkpoint:
+    if checkpoint_path is None and cfg.get('auto_last_checkpoint', False):
         ckpt_dir = root_dir / "checkpoints" / cfg.experiment.mode
         # Exclude existing probe checkpoints to avoid confusion
         checkpoints = [p for p in ckpt_dir.glob("*.pth") if "probe" not in p.name]
