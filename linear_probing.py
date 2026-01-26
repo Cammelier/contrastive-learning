@@ -130,7 +130,7 @@ def main(cfg: DictConfig):
     
     # 8. Training loop
     best_test_acc = 0.0
-    linear_probe_epochs = cfg.get('linear_probe_epochs', 100)
+    linear_probe_epochs = cfg.get('linear_probe_epochs', 20)
     
     print(f"\n--- Starting Linear Probing ({linear_probe_epochs} epochs) ---\n")
     
