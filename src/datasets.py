@@ -30,64 +30,51 @@ def get_standard_transform(size: int):
         T.Resize(size),
         T.CenterCrop(size),
         T.ToTensor(),
-        T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.247, 0.243, 0.261])
     ])
 
 def prepare_loader(cfg, split: str = 'train'):
     """
-    Prepares the DataLoader for specific splits of STL10.
+    Optimized Loader: only loads raw tensors. 
+    Augmentations and Normalization are handled by Kornia on GPU.
     """
     cfg_data = cfg.data
     
-    # 1. Choose transformation logic
-    if split in ['train', 'unlabeled']:
-        # If we are doing any form of Contrastive Learning (Self-Supervised or Supervised),
-        # we NEED the double view to avoid loss collapse (diagonal = 1.0)
-        if cfg.experiment.mode in ['self_supervised', 'supervised']:
-            transform = T.Compose([
-        T.ToTensor(), # Carica solo l'immagine base
-            ])
-        else:
-            # Standard supervised case (e.g., standard Cross-Entropy)
-            transform = T.Compose([
-                T.RandomResizedCrop(cfg_data.size),
-                T.RandomHorizontalFlip(),
-                T.ToTensor(),
-                T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.247, 0.243, 0.261])
-            ])
-    else:
-        # Validation and Test sets use fixed standard transforms
-        transform = get_standard_transform(cfg_data.size)
+    # 1. Minimal Transform: just Resize and ToTensor
+    # We resize here to ensure memory stability in the DataLoader
+    transform = T.Compose([
+        T.Resize((cfg_data.size, cfg_data.size)),
+        T.ToTensor(),
+    ])
 
-    # 2. Load Dataset and handle Validation split
+    # 2. Load Dataset
     if split == 'val':
         # Create a validation set by splitting the 5000 labeled training images
         full_train = STL10(root=cfg_data.root_path, split='train', download=True, transform=transform)
         train_len = int(len(full_train) * 0.9)
         val_len = len(full_train) - train_len
 
-        generator = torch.Generator().manual_seed(cfg.seed)
-
         # Use a fixed seed for reproducibility of the split
-        _, val_dataset = random_split(full_train, [train_len, val_len], 
-                                     generator=torch.Generator().manual_seed(cfg.seed))
+        _, val_dataset = random_split(
+            full_train, [train_len, val_len], 
+            generator=torch.Generator().manual_seed(cfg.seed)
+        )
         dataset = val_dataset
     else:
-        # Standard STL10 splits: 'train' (5k), 'test' (8k), or 'unlabeled' (100k)
+        # 'train', 'test', or 'unlabeled'
         dataset = STL10(root=cfg_data.root_path, split=split, download=True, transform=transform)
 
     # 3. Create DataLoader
-    # Note: drop_last is True for training to maintain stable batch statistics in Contrastive Loss
     loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size, 
         shuffle=True if split in ['train', 'unlabeled'] else False,
         num_workers=cfg_data.num_workers,
-        pin_memory=cfg_data.augmentation.pin_memory,
+        pin_memory=True, # Critical for high-speed GPU transfer
         drop_last=True if split in ['train', 'unlabeled'] else False
     )
 
     return loader
+
 
 def prepare_all_loaders(cfg):
     """
