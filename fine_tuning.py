@@ -19,7 +19,7 @@ from src.models import SimCLR
 # --- STRONG AUGMENTATIONS FOR FINE-TUNING ---
 def get_strong_finetuning_transforms(device):
     train_aug = nn.Sequential(
-        K.RandomResizedCrop(size=(96, 96), scale=(0.2, 1.0)), 
+        K.RandomResizedCrop(size=(96, 96), scale=(0.5, 1.0)), 
         K.RandomHorizontalFlip(p=0.5),
         K.ColorJitter(0.4, 0.4, 0.4, 0.1, p=0.8),
         K.RandomGrayscale(p=0.2),

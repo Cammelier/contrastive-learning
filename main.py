@@ -90,7 +90,7 @@ def run_training(cfg, device, model, ckpt_dir):
     gpu_aug, gpu_val_aug = get_gpu_transforms(device)
 
     # 2. Training Dynamics
-    target_bs = 1024
+    target_bs = 1024 
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
     criterion = ContrastiveLoss(
@@ -100,7 +100,8 @@ def run_training(cfg, device, model, ckpt_dir):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.experiment.learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.experiment.epochs)
-    scaler = torch.amp.GradScaler()
+    
+    scaler = torch.amp.GradScaler('cuda')
 
     # 3. Online Linear Classifier (trained on frozen features)
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
@@ -118,6 +119,7 @@ def run_training(cfg, device, model, ckpt_dir):
         cls_optimizer.zero_grad()
 
         for i, (imgs, labels) in enumerate(pbar):
+            if isinstance(imgs, list): imgs = imgs[0]
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True).long() 
 
@@ -137,7 +139,6 @@ def run_training(cfg, device, model, ckpt_dir):
            
             if (i + 1) % accumulation_steps == 0:
                 scaler.step(optimizer)
-                scaler.update()
                 optimizer.zero_grad()
 
             total_loss += loss.item()
@@ -149,31 +150,28 @@ def run_training(cfg, device, model, ckpt_dir):
                     logits = classifier(h_i)
                     cls_loss = F.cross_entropy(logits, labels)
 
-            
-
                 cls_optimizer.zero_grad()
                 scaler.scale(cls_loss).backward()
                 scaler.step(cls_optimizer)
-                scaler.update()
-
+                
                 preds = logits.argmax(dim=1)
                 total_correct += (preds == labels).sum().item()
                 total_samples += labels.size(0)
-                
-            # Update progress bar safely
+
+            # --- SCALER UPDATE ---
+            if (i + 1) % accumulation_steps == 0:
+                scaler.update()
+
+            # Update progress bar
             metrics = {'loss': f'{loss.item():.3f}'}
             if total_samples > 0:
-                acc_value = total_correct / total_samples
-                metrics['acc'] = f'{acc_value:.2%}'
-            else:
-                metrics['acc'] = '0.00%' # Default if no valid labels yet
+                metrics['acc'] = f'{(total_correct / total_samples):.2%}'
             pbar.set_postfix(metrics)
         
         # Validation Phase
         val_loss_avg, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg, gpu_val_aug)
-        print(f"Epoch {epoch+1} Summary: Val Loss {val_loss_avg:.4f}, Val Acc {val_acc:.2%}")
         
-        # --- FIXED WANDB LOGGING (Inside Epoch Loop) ---
+        # WandB logging
         wandb.log({
             "train/loss": total_loss / len(train_loader), 
             "train/acc": (total_correct / total_samples) if total_samples > 0 else 0.0,
