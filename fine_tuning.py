@@ -49,7 +49,7 @@ def main(cfg: DictConfig):
     # Init WandB
     wandb.init(
         project=cfg.logger.project, 
-        group="finetuning_strong", # Cambiato nome gruppo per distinguere
+        group="finetuning_strong", 
         name=f"ft_strong_{cfg.model.backbone}",
         config=OmegaConf.to_container(cfg, resolve=True)
     )
@@ -108,7 +108,7 @@ def main(cfg: DictConfig):
     scaler = torch.amp.GradScaler('cuda')
 
     # 6. Training Loop
-    ft_epochs = 30 # Puoi provare ad alzarlo a 50 se vedi che migliora ancora
+    ft_epochs = ft_epochs = cfg.get("epochs", 30)
     best_acc = 0.0
 
     print(f"\n--- Starting Fine-Tuning ({ft_epochs} epochs) ---\n")
@@ -128,7 +128,7 @@ def main(cfg: DictConfig):
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             
-            # Applicazione Augmentations CATTIVE su GPU
+            # Augmentations on GPU
             with torch.no_grad():
                 imgs = train_aug(imgs)
             
