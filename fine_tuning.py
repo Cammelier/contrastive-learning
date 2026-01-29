@@ -23,14 +23,14 @@ def get_strong_finetuning_transforms(device):
         K.RandomHorizontalFlip(p=0.5),
         K.ColorJitter(0.4, 0.4, 0.4, 0.1, p=0.8),
         K.RandomGrayscale(p=0.2),
-        K.Normalize(mean=torch.tensor([0.4914, 0.4822, 0.4465]), 
-                    std=torch.tensor([0.247, 0.243, 0.261]))
+        K.Normalize(mean=torch.tensor([0.4467, 0.4398, 0.4066]), 
+                    std=torch.tensor([0.2603, 0.2566, 0.2713]]))
     ).to(device)
 
    
     test_aug = nn.Sequential(
-        K.Normalize(mean=torch.tensor([0.4914, 0.4822, 0.4465]), 
-                    std=torch.tensor([0.247, 0.243, 0.261]))
+        K.Normalize(mean=torch.tensor([0.4467, 0.4398, 0.4066]), 
+                    std=torch.tensor([0.2603, 0.2566, 0.2713]))
     ).to(device)
     
     return train_aug, test_aug
@@ -101,14 +101,23 @@ def main(cfg: DictConfig):
     print("✓ Model fully unfrozen. Ready for Fine-Tuning.")
 
     # 5. Optimizer & Loss
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW([
+        {'params': model.backbone.parameters(), 'lr': 1e-5},
+        {'params': model.classifier.parameters(), 'lr': 1e-4}
+    ],weight_decay=1e-2)
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, 
+    T_max=ft_epochs, 
+    eta_min=1e-6
+)
     criterion = nn.CrossEntropyLoss()
     
     # Mixed Precision Scaler for T4
     scaler = torch.amp.GradScaler('cuda')
 
     # 6. Training Loop
-    ft_epochs = ft_epochs = cfg.get("epochs", 30)
+    ft_epochs = cfg.get("epochs", 30)
     best_acc = 0.0
 
     print(f"\n--- Starting Fine-Tuning ({ft_epochs} epochs) ---\n")
@@ -185,6 +194,8 @@ def main(cfg: DictConfig):
         
         print(f"Epoch {epoch+1} Result | Train Acc: {train_correct/train_total:.2%} | Test Acc: {test_acc:.2%}")
         
+        scheduler.step()
+
         # Log to WandB
         wandb.log({
             "epoch": epoch + 1,
