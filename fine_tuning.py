@@ -108,7 +108,7 @@ def main(cfg: DictConfig):
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, 
-    T_max=ft_epochs, 
+    T_max=cfg.epochs, 
     eta_min=1e-6
 )
     criterion = nn.CrossEntropyLoss()
