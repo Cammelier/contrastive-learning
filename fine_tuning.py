@@ -24,7 +24,7 @@ def get_strong_finetuning_transforms(device):
         K.ColorJitter(0.4, 0.4, 0.4, 0.1, p=0.8),
         K.RandomGrayscale(p=0.2),
         K.Normalize(mean=torch.tensor([0.4467, 0.4398, 0.4066]), 
-                    std=torch.tensor([0.2603, 0.2566, 0.2713]]))
+                    std=torch.tensor([0.2603, 0.2566, 0.2713]))
     ).to(device)
 
    
