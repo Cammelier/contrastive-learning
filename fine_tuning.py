@@ -117,7 +117,7 @@ def main(cfg: DictConfig):
     scaler = torch.amp.GradScaler('cuda')
 
     # 6. Training Loop
-    ft_epochs = cfg.get("epochs", 30)
+    ft_epochs = cfg.epochs
     best_acc = 0.0
 
     print(f"\n--- Starting Fine-Tuning ({ft_epochs} epochs) ---\n")
