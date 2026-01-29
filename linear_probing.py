@@ -266,27 +266,38 @@ def main(cfg: DictConfig):
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
-    # Per-class accuracy & Confusion Matrix
+    # Recupero automatico dei nomi delle classi dal dataset
+    # Nota: se usi random_split, devi risalire al dataset originale
+    if hasattr(test_loader.dataset, 'classes'):
+        class_names = test_loader.dataset.classes
+    else:
+        # Caso in cui sia un Subset (comune dopo random_split)
+        class_names = test_loader.dataset.dataset.classes
+
     from sklearn.metrics import confusion_matrix
-    import numpy as np
     import matplotlib.pyplot as plt
     import seaborn as sns
     
     cm = confusion_matrix(all_labels, all_preds)
-    per_class_acc = cm.diagonal() / cm.sum(axis=1)
     
-    print(f"\nBest Test Accuracy: {best_test_acc:.4f}")
+    fig, ax = plt.subplots(figsize=(12, 10))
+    sns.heatmap(
+        cm, 
+        annot=True, 
+        fmt='d', 
+        cmap='Blues', 
+        ax=ax,
+        xticklabels=class_names, # Nomi automatici
+        yticklabels=class_names  # Nomi automatici
+    )
     
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
     ax.set_title(f'Confusion Matrix (Acc: {best_test_acc:.4f})')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
     
-    wandb.log({
-        "final/best_test_accuracy": best_test_acc,
-        "final/confusion_matrix": wandb.Image(fig),
-    })
-    
+    wandb.log({"final/confusion_matrix": wandb.Image(fig)})
     plt.close()
+
     wandb.finish()
 
 if __name__ == "__main__":

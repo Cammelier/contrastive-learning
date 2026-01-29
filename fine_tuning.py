@@ -1,7 +1,6 @@
 """
 Fine-Tuning Script (Optimized against Overfitting).
-Loads the pre-trained SimCLR encoder, unfreezes all layers, 
-and trains with STRONG augmentations and HIGHER weight decay.
+Includes automatic Confusion Matrix generation with class names.
 """
 
 import hydra 
@@ -12,25 +11,30 @@ import kornia.augmentation as K
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
 from tqdm import tqdm 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+import numpy as np
 
 from src.datasets import prepare_loader
 from src.models import SimCLR
 
 # --- STRONG AUGMENTATIONS FOR FINE-TUNING ---
 def get_strong_finetuning_transforms(device):
+    # Stats for STL-10
+    mean = torch.tensor([0.4467, 0.4398, 0.4066])
+    std = torch.tensor([0.2603, 0.2566, 0.2713])
+    
     train_aug = nn.Sequential(
         K.RandomResizedCrop(size=(96, 96), scale=(0.5, 1.0)), 
         K.RandomHorizontalFlip(p=0.5),
         K.ColorJitter(0.4, 0.4, 0.4, 0.1, p=0.8),
         K.RandomGrayscale(p=0.2),
-        K.Normalize(mean=torch.tensor([0.4467, 0.4398, 0.4066]), 
-                    std=torch.tensor([0.2603, 0.2566, 0.2713]))
+        K.Normalize(mean=mean, std=std)
     ).to(device)
 
-   
     test_aug = nn.Sequential(
-        K.Normalize(mean=torch.tensor([0.4467, 0.4398, 0.4066]), 
-                    std=torch.tensor([0.2603, 0.2566, 0.2713]))
+        K.Normalize(mean=mean, std=std)
     ).to(device)
     
     return train_aug, test_aug
@@ -42,11 +46,9 @@ def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     
-    # Enable CuDNN benchmark for T4 (fixed input size optimization)
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
 
-    # Init WandB
     wandb.init(
         project=cfg.logger.project, 
         group="finetuning_strong", 
@@ -59,163 +61,134 @@ def main(cfg: DictConfig):
     train_loader = prepare_loader(cfg, split='train')
     test_loader = prepare_loader(cfg, split='test')
     
+    # --- AUTOMATIC CLASS NAMES RETRIEVAL ---
+    # Access the base dataset to get class names
+    if hasattr(test_loader.dataset, 'classes'):
+        class_names = test_loader.dataset.classes
+    else:
+        class_names = test_loader.dataset.dataset.classes
+    print(f"✓ Detected classes: {class_names}")
+
     train_aug, test_aug = get_strong_finetuning_transforms(device)
 
     # 3. Model Setup
     model = SimCLR(base_model=cfg.model.backbone, out_dim=cfg.model.out_dim).to(device)
     
-    # --- LOAD PRE-TRAINED SELF-SUPERVISED WEIGHTS ---
     ckpt_path = root_dir / "checkpoints" / "self_supervised" / "last_model.pth"
-    
     if ckpt_path.exists():
         print(f"Loading pre-trained weights from: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    else:
-        print("⚠️ WARNING: Pre-trained checkpoint not found! Training from scratch.")
 
-    # --- SETUP CLASSIFIER HEAD ---
-    if cfg.model.backbone == 'resnet18':
-        feature_dim = 512
-    else:
-        feature_dim = 2048 
-        
-    num_classes = cfg.data.num_classes
-    
-    model.classifier = nn.Linear(feature_dim, num_classes).to(device)
+    feature_dim = 512 if cfg.model.backbone == 'resnet18' else 2048 
+    model.classifier = nn.Linear(feature_dim, cfg.data.num_classes).to(device)
 
-    # --- LOAD LINEAR PROBE WEIGHTS ---
     probe_path = root_dir / "checkpoints" / "self_supervised" / "best_linear_probe.pth"
-    
     if probe_path.exists():
-        print("✓ Loading Linear Probe weights (Starting point optimized)...")
+        print("✓ Loading Linear Probe weights...")
         probe_ckpt = torch.load(probe_path, map_location=device)
         model.classifier.load_state_dict(probe_ckpt['classifier_state_dict'])
-    else:
-        print("Linear probe checkpoint not found. Initializing classifier randomly.")
 
     # 4. FULL UNFREEZE
     for param in model.parameters():
         param.requires_grad = True
     
-    print("✓ Model fully unfrozen. Ready for Fine-Tuning.")
-
-    # 5. Optimizer & Loss
+    # 5. Optimizer, Scheduler & Loss
+    ft_epochs = cfg.epochs
     optimizer = torch.optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': 1e-5},
         {'params': model.classifier.parameters(), 'lr': 1e-4}
-    ],weight_decay=1e-2)
+    ], weight_decay=1e-2)
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, 
-    T_max=cfg.epochs, 
-    eta_min=1e-6
-)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=ft_epochs, eta_min=1e-6)
     criterion = nn.CrossEntropyLoss()
-    
-    # Mixed Precision Scaler for T4
     scaler = torch.amp.GradScaler('cuda')
 
     # 6. Training Loop
-    ft_epochs = cfg.epochs
     best_acc = 0.0
-
     print(f"\n--- Starting Fine-Tuning ({ft_epochs} epochs) ---\n")
 
     for epoch in range(ft_epochs):
         model.train()
-        train_loss = 0
-        train_correct = 0
-        train_total = 0
-        
+        train_correct, train_total = 0, 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{ft_epochs}")
         
         for imgs, labels in pbar:
-            if isinstance(imgs, list): 
-                imgs = imgs[0]
+            if isinstance(imgs, list): imgs = imgs[0]
+            imgs, labels = imgs.to(device), labels.to(device)
             
-            imgs = imgs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            with torch.no_grad(): imgs = train_aug(imgs)
             
-            # Augmentations on GPU
-            with torch.no_grad():
-                imgs = train_aug(imgs)
-            
-            # Mixed Precision Forward Pass
             with torch.amp.autocast('cuda'):
-                features = model.backbone(imgs)
-                features = torch.flatten(features, 1) 
+                features = torch.flatten(model.backbone(imgs), 1) 
                 logits = model.classifier(features)
                 loss = criterion(logits, labels)
 
-            # Backward Pass
             optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
             
-            # Metrics
-            train_loss += loss.item()
             preds = logits.argmax(1)
             train_correct += (preds == labels).sum().item()
             train_total += labels.size(0)
-            
-            current_acc = train_correct / train_total
-            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{current_acc:.2%}'})
+            pbar.set_postfix({'acc': f'{train_correct/train_total:.2%}'})
 
-        # --- VALIDATION PHASE ---
+        # --- VALIDATION ---
         model.eval()
-        test_correct = 0
-        test_total = 0
-        test_loss = 0
-        
+        test_correct, test_total = 0, 0
         with torch.no_grad():
             for imgs, labels in test_loader:
                 if isinstance(imgs, list): imgs = imgs[0]
-                
-                imgs = imgs.to(device, non_blocking=True)
-                labels = labels.to(device, non_blocking=True)
-                
-                # Test Augmentation (Solo Normalize)
+                imgs, labels = imgs.to(device), labels.to(device)
                 imgs = test_aug(imgs) 
-                
                 with torch.amp.autocast('cuda'):
-                    features = model.backbone(imgs)
-                    features = torch.flatten(features, 1)
-                    logits = model.classifier(features)
-                    t_loss = criterion(logits, labels)
-                
-                test_loss += t_loss.item()
+                    logits = model.classifier(torch.flatten(model.backbone(imgs), 1))
                 test_correct += (logits.argmax(1) == labels).sum().item()
                 test_total += labels.size(0)
         
         test_acc = test_correct / test_total
-        avg_test_loss = test_loss / len(test_loader)
-        
         print(f"Epoch {epoch+1} Result | Train Acc: {train_correct/train_total:.2%} | Test Acc: {test_acc:.2%}")
         
         scheduler.step()
+        wandb.log({"epoch": epoch + 1, "ft/train_acc": train_correct/train_total, "ft/test_acc": test_acc})
 
-        # Log to WandB
-        wandb.log({
-            "epoch": epoch + 1,
-            "ft/train_loss": train_loss / len(train_loader),
-            "ft/train_acc": train_correct / train_total,
-            "ft/test_loss": avg_test_loss,
-            "ft/test_acc": test_acc
-        })
-
-        # Save Best Model
         if test_acc > best_acc:
             best_acc = test_acc
-            save_path = root_dir / "checkpoints" / "self_supervised" / "finetuned_best.pth"
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'accuracy': best_acc
-            }, save_path)
-            print(f"  ✓ New best model saved! ({best_acc:.2%})")
+            torch.save({'model_state_dict': model.state_dict(), 'accuracy': best_acc}, 
+                       root_dir / "checkpoints" / "self_supervised" / "finetuned_best.pth")
 
+    # --- 7. FINAL EVALUATION FOR CONFUSION MATRIX ---
+    print("\nGenerating Confusion Matrix on Test Set...")
+    model.eval()
+    all_preds, all_labels = [], []
+    
+    with torch.no_grad():
+        for imgs, labels in tqdm(test_loader, desc="Final Eval"):
+            if isinstance(imgs, list): imgs = imgs[0]
+            imgs = test_aug(imgs.to(device))
+            with torch.amp.autocast('cuda'):
+                logits = model.classifier(torch.flatten(model.backbone(imgs), 1))
+            all_preds.extend(logits.argmax(1).cpu().numpy())
+            all_labels.extend(labels.numpy())
+
+    # Create Confusion Matrix Plot
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.title(f'Confusion Matrix - {cfg.model.backbone} (Acc: {best_acc:.2%})')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Save and Log
+    cm_path = root_dir / "checkpoints" / "self_supervised" / "confusion_matrix.png"
+    plt.savefig(cm_path)
+    wandb.log({"final/confusion_matrix": wandb.Image(str(cm_path))})
+    print(f"✓ Matrix saved at {cm_path}")
+    
     wandb.finish()
 
 if __name__ == "__main__":
