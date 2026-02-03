@@ -43,6 +43,7 @@ def get_strong_finetuning_transforms(device):
 def main(cfg: DictConfig):
     # 1. Setup Environment
     root_dir = Path(hydra.utils.get_original_cwd())
+    # Rilevamento automatico: usa GPU se disponibile, altrimenti CPU
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     
@@ -61,8 +62,6 @@ def main(cfg: DictConfig):
     train_loader = prepare_loader(cfg, split='train')
     test_loader = prepare_loader(cfg, split='test')
     
-    # --- AUTOMATIC CLASS NAMES RETRIEVAL ---
-    # Access the base dataset to get class names
     if hasattr(test_loader.dataset, 'classes'):
         class_names = test_loader.dataset.classes
     else:
@@ -102,7 +101,9 @@ def main(cfg: DictConfig):
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=ft_epochs, eta_min=1e-6)
     criterion = nn.CrossEntropyLoss()
-    scaler = torch.amp.GradScaler('cuda')
+    
+    # Lo scaler è utile solo su GPU, su CPU usiamo None
+    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
 
     # 6. Training Loop
     best_acc = 0.0
@@ -119,15 +120,21 @@ def main(cfg: DictConfig):
             
             with torch.no_grad(): imgs = train_aug(imgs)
             
-            with torch.amp.autocast('cuda'):
+            # Autocast attivato solo se disponibile CUDA
+            with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
                 features = torch.flatten(model.backbone(imgs), 1) 
                 logits = model.classifier(features)
                 loss = criterion(logits, labels)
 
             optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             
             preds = logits.argmax(1)
             train_correct += (preds == labels).sum().item()
@@ -142,7 +149,7 @@ def main(cfg: DictConfig):
                 if isinstance(imgs, list): imgs = imgs[0]
                 imgs, labels = imgs.to(device), labels.to(device)
                 imgs = test_aug(imgs) 
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
                     logits = model.classifier(torch.flatten(model.backbone(imgs), 1))
                 test_correct += (logits.argmax(1) == labels).sum().item()
                 test_total += labels.size(0)
@@ -167,12 +174,11 @@ def main(cfg: DictConfig):
         for imgs, labels in tqdm(test_loader, desc="Final Eval"):
             if isinstance(imgs, list): imgs = imgs[0]
             imgs = test_aug(imgs.to(device))
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
                 logits = model.classifier(torch.flatten(model.backbone(imgs), 1))
             all_preds.extend(logits.argmax(1).cpu().numpy())
             all_labels.extend(labels.numpy())
 
-    # Create Confusion Matrix Plot
     cm = confusion_matrix(all_labels, all_preds)
     plt.figure(figsize=(12, 10))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
@@ -183,11 +189,9 @@ def main(cfg: DictConfig):
     plt.xticks(rotation=45)
     plt.tight_layout()
     
-    # Save and Log
     cm_path = root_dir / "checkpoints" / "self_supervised" / "confusion_matrix.png"
     plt.savefig(cm_path)
     wandb.log({"final/confusion_matrix": wandb.Image(str(cm_path))})
-    print(f"✓ Matrix saved at {cm_path}")
     
     wandb.finish()
 

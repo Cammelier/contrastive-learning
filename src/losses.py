@@ -49,7 +49,7 @@ class ContrastiveLoss(nn.Module):
         # 4. Auto-similarity exclusion (Diagonal of the matrix)
         # We must prevent an image from being used as its own positive or negative example
         logits_mask = torch.scatter(
-            torch.ones_like(mask), 
+            torch.ones_like(mask, device=device), 
             1, 
             torch.arange(full_batch_size, device=device).view(-1, 1), 
             0 
@@ -69,7 +69,7 @@ class ContrastiveLoss(nn.Module):
         pos_per_row = mask.sum(1)
         
         # Avoid division by zero if a class appears only once in the batch
-        pos_per_row = torch.where(pos_per_row > 0, pos_per_row, torch.ones_like(pos_per_row))
+        pos_per_row = torch.where(pos_per_row > 0, pos_per_row, torch.ones_like(pos_per_row, device=device))
         
         mean_log_prob_pos = (mask * log_prob).sum(1) / pos_per_row
 
