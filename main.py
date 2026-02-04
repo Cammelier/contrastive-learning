@@ -1,5 +1,6 @@
 import hydra 
 import torch 
+torch.set_num_threads(32)
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
@@ -75,7 +76,7 @@ def run_training(cfg, device, model, ckpt_dir):
     val_loader = prepare_loader(cfg, split='val')
     gpu_aug, gpu_val_aug = get_gpu_transforms(device)
 
-    target_bs = 1024 
+    target_bs = 512 
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
     criterion = ContrastiveLoss(
