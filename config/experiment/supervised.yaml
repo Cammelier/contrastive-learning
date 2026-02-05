@@ -2,4 +2,4 @@ mode: "supervised"
 supervised: true
 temperature: 0.15
 learning_rate: 5e-4
-epochs: 30
+epochs: 150

@@ -6,9 +6,9 @@ defaults:
 
 seed: 42
 device: "cuda"
-epochs: 30
+epochs: 150
 batch_size: 32
-num_workers: 4
+num_workers: 6
 stage: all
 
 checkpoint_path: null  

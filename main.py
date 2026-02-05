@@ -1,5 +1,6 @@
 import hydra 
 import torch 
+from torchlars import LARS
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
@@ -75,7 +76,7 @@ def run_training(cfg, device, model, ckpt_dir):
     val_loader = prepare_loader(cfg, split='val')
     gpu_aug, gpu_val_aug = get_gpu_transforms(device)
 
-    target_bs = 1024 
+    target_bs = 1024
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
     criterion = ContrastiveLoss(
@@ -83,16 +84,27 @@ def run_training(cfg, device, model, ckpt_dir):
         supervised=cfg.experiment.supervised
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.experiment.learning_rate, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.experiment.epochs)
+ 
+    base_optimizer = torch.optim.SGD(
+        model.parameters(), 
+        lr=cfg.experiment.learning_rate, 
+        momentum=0.9, 
+        weight_decay=cfg.experiment.weight_decay # Usa il weight decay del config, non hardcodato
+    )
+
     
-    # Scaler dinamico: attivo solo su GPU
-    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
+    optimizer = LARS(
+        optimizer=base_optimizer, 
+        eps=1e-8, 
+        trust_coef=0.001 
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.experiment.epochs)
+
 
     # Classifier per Online Linear Probing
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
     classifier = nn.Linear(feat_dim, 10).to(device)
-    cls_optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3) 
+    cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-3,momentum=0.9) 
 
     for epoch in range(cfg.experiment.epochs):
         model.train()

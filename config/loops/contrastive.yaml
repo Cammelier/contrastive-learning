@@ -1,12 +1,12 @@
 name: contrastive_loop
 
 training: 
-  epochs: 30
+  epochs: 150
 
   dataloader:
     batch_size: ${batch_size}
     shuffle: true
-    num_workers: 4
+    num_workers: 6
     pin_memory: true
   
   early_stopping:
@@ -17,7 +17,7 @@ training:
     dataloader:
       batch_size: ${batch_size}
       shuffle: false
-      num_workers: 4
+      num_workers: 6
       shuffle: false
       pin_memory: true
   
@@ -25,7 +25,7 @@ training:
     dataloader:
       batch_size: ${batch_size}
       shuffle: false
-      num_workers: 4
+      num_workers: 6
       pin_memory: true
   
   mixed_precision: true
