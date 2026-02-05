@@ -21,8 +21,8 @@ from src.models import SimCLR
 
 # --- GPU/CPU TRANSFORMS FOR LINEAR PROBING ---
 def get_linear_probe_transforms(device):
-    mean = torch.tensor([0.4914, 0.4822, 0.4465])
-    std = torch.tensor([0.247, 0.243, 0.261])
+    mean = torch.tensor([0.4467, 0.4398, 0.4066])
+    std = torch.tensor([0.2603, 0.2566, 0.2713])
     
     train_aug = nn.Sequential(
         K.RandomResizedCrop(size=(96, 96), scale=(0.5, 1.0)), 
