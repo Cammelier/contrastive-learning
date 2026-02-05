@@ -69,7 +69,7 @@ def prepare_loader(cfg, split: str = 'train'):
         batch_size=cfg.batch_size, 
         shuffle=True if split in ['train', 'unlabeled'] else False,
         num_workers=cfg_data.num_workers,
-        pin_memory=False, # Set to False for CPU-based environments/VMs
+        pin_memory=True, 
         drop_last=True if split in ['train', 'unlabeled'] else False
     )
 
