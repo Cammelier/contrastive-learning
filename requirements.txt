@@ -6,6 +6,10 @@
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
+kornia # Added for GPU-accelerated data augmentations
+
+# Optimizers (Specific for Large Batch Training)
+torchlars # Added for LARS optimizer implementation
 
 # Configuration Management
 hydra-core>=1.3.2
