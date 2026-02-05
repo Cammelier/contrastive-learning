@@ -25,7 +25,11 @@ training:
     dataloader:
       batch_size: ${batch_size}
       shuffle: false
+<<<<<<< HEAD
       num_workers: 6
+=======
+      num_workers: 2
+>>>>>>> 8fe8cf4a58355c632a5751368c1c4fb042f95266
       pin_memory: true
   
   mixed_precision: true
