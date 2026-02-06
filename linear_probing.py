@@ -1,7 +1,6 @@
 """
-Linear Probing per valutare le rappresentazioni apprese dal contrastive learning.
-Freeze l'encoder e addestra solo un linear classifier.
-OPTIMIZED: CPU/GPU Auto-detection + Mixed Precision (Tesla T4 ready)
+Linear Probing EVALUATION - Optimized for RTX 4090 (Ada Lovelace)
+Protocol: SGD + Momentum + BF16 + TF32
 """
 
 import hydra 
@@ -14,15 +13,18 @@ from pathlib import Path
 from tqdm import tqdm 
 from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
+import sns_setup # alias per seaborn se preferisci, o usa seaborn standard
 import seaborn as sns
 
 from src.datasets import prepare_loader
 from src.models import SimCLR
 
-# --- GPU/CPU TRANSFORMS FOR LINEAR PROBING ---
+# --- Ottimizzazione RTX 4090 (TF32) ---
+torch.set_float32_matmul_precision('high')
+
 def get_linear_probe_transforms(device):
-    mean = torch.tensor([0.4467, 0.4398, 0.4066])
-    std = torch.tensor([0.2603, 0.2566, 0.2713])
+    mean = torch.tensor([0.485, 0.456, 0.406]) # Standard ImageNet stats
+    std = torch.tensor([0.229, 0.224, 0.225])
     
     train_aug = nn.Sequential(
         K.RandomResizedCrop(size=(96, 96), scale=(0.5, 1.0)), 
@@ -38,84 +40,69 @@ def get_linear_probe_transforms(device):
 
 @hydra.main(version_base="1.2", config_path="config", config_name="configuratore")
 def main(cfg: DictConfig):
-    # 1. Setup
+    # 1. Setup Ambiente
     root_dir = Path(hydra.utils.get_original_cwd())
-    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
-    
-    # 2. Carica checkpoint del modello pretrained
+    # 2. Checkpoint Logic
     checkpoint_path = cfg.get('checkpoint_path', None)
-    
     if checkpoint_path is None and cfg.get('auto_last_checkpoint', False):
         ckpt_dir = root_dir / "checkpoints" / cfg.experiment.mode
         checkpoints = [p for p in ckpt_dir.glob("*.pth") if "probe" not in p.name]
-        
-        if checkpoints:
-            checkpoint_path = max(checkpoints, key=lambda p: p.stat().st_mtime)
-        else:
-            raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
-    
-    # 3. Wandb setup
+        checkpoint_path = max(checkpoints, key=lambda p: p.stat().st_mtime) if checkpoints else None
+
+    # 3. Wandb
     wandb.init(
         project=cfg.logger.project,
         group=f"{cfg.experiment.mode}_linear_probing",
-        name=f"probe_{cfg.model.backbone}_seed{cfg.seed}",
+        name=f"probe_4090_bf16_lr{cfg.get('linear_probe_lr', 0.1)}",
         config=OmegaConf.to_container(cfg, resolve=True)
     )
     
-    # 4. Carica dataloaders
-    print("Loading data...")
+    # 4. Data (Aumenta num_workers nel config per la 4090!)
     train_loader = prepare_loader(cfg, split='train')
     test_loader = prepare_loader(cfg, split='test')
-    
     train_aug, test_aug = get_linear_probe_transforms(device)
     
-    # 5. Carica encoder pretrained e FREEZALO
-    print("Loading pretrained encoder...")
-    encoder = SimCLR(
-        base_model=cfg.model.backbone, 
-        out_dim=cfg.model.out_dim
-    ).to(device)
-    
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint['model_state_dict']
-    encoder.load_state_dict(state_dict, strict=False)
+    # 5. Encoder Frozen
+    encoder = SimCLR(base_model=cfg.model.backbone, out_dim=cfg.model.out_dim).to(device)
+    if checkpoint_path:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        encoder.load_state_dict(checkpoint['model_state_dict'], strict=False)
     
     for param in encoder.parameters():
         param.requires_grad = False
     encoder.eval()
     
-    print("✓ Encoder frozen (no gradient updates)")
-    
-    # 6. Linear classifier
+    # 6. Linear Classifier con Normalizzazione (MoCo style)
     feature_dim = 512 if cfg.model.backbone == 'resnet18' else 2048
-    num_classes = cfg.data.num_classes
-    linear_classifier = nn.Linear(feature_dim, num_classes).to(device)
+    linear_classifier = nn.Sequential(
+        nn.BatchNorm1d(feature_dim, affine=False), 
+        nn.Linear(feature_dim, cfg.data.num_classes)
+    ).to(device)
     
-    print(f"Linear classifier: {feature_dim} -> {num_classes}")
-    
-    # 7. Optimizer e Loss
-    optimizer = torch.optim.Adam(
+    # 7. Optimizer (SGD + Momentum) e Mixed Precision
+    optimizer = torch.optim.SGD(
         linear_classifier.parameters(),
-        lr=cfg.get('linear_probe_lr', 0.0003),
-        weight_decay=1e-4
+        lr=cfg.get('linear_probe_lr', 0.1), # Con 4090 puoi testare anche 0.3 o 0.5
+        momentum=0.9,
+        weight_decay=0
     )
+    
+    epochs = cfg.get('linear_probe_epochs', 30)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    
+    # RTX 4090 supporta BFloat16 nativamente
+    autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    scaler = torch.amp.GradScaler('cuda', enabled=(autocast_dtype == torch.float16))
     criterion = nn.CrossEntropyLoss()
-    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
-    
-    # 8. Training loop
-    best_test_acc = 0.0
-    linear_probe_epochs = cfg.get('linear_probe_epochs', 20)
-    
-    print(f"\n--- Starting Linear Probing ({linear_probe_epochs} epochs) ---\n")
-    
-    for epoch in range(linear_probe_epochs):
+
+    # 8. Loop
+    for epoch in range(epochs):
         linear_classifier.train()
-        train_loss, train_correct, train_total = 0, 0, 0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{linear_probe_epochs}")
+        train_correct, train_total = 0, 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [BF16]")
         
         for imgs, labels in pbar:
             if isinstance(imgs, list): imgs = imgs[0]
@@ -123,14 +110,15 @@ def main(cfg: DictConfig):
 
             with torch.no_grad(): imgs = train_aug(imgs)
             
-            with torch.amp.autocast(device_type=device.type, enabled=torch.cuda.is_available()):
+            optimizer.zero_grad(set_to_none=True) # Ottimizzazione memoria 4090
+            
+            with torch.amp.autocast(device_type='cuda', dtype=autocast_dtype):
                 with torch.no_grad():
                     features = encoder(imgs, return_features=True)
                 logits = linear_classifier(features)
                 loss = criterion(logits, labels)
             
-            optimizer.zero_grad()
-            if scaler is not None:
+            if scaler.is_enabled():
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
@@ -138,64 +126,45 @@ def main(cfg: DictConfig):
                 loss.backward()
                 optimizer.step()
             
-            train_loss += loss.item()
-            preds = torch.argmax(logits, dim=1)
-            train_correct += (preds == labels).sum().item()
+            train_correct += (logits.argmax(1) == labels).sum().item()
             train_total += labels.size(0)
             pbar.set_postfix({'acc': f'{train_correct/train_total:.4f}'})
         
-        # Test (evaluation)
+        scheduler.step()
+        
+        # Test
         linear_classifier.eval()
-        test_loss, test_correct, test_total = 0, 0, 0
+        test_correct, test_total = 0, 0
         with torch.no_grad():
-            for imgs, labels in tqdm(test_loader, desc="Testing", leave=False):
+            for imgs, labels in test_loader:
                 if isinstance(imgs, list): imgs = imgs[0]
-                imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-                imgs = test_aug(imgs)
-                
-                with torch.amp.autocast(device_type=device.type, enabled=torch.cuda.is_available()):
+                imgs = test_aug(imgs.to(device))
+                with torch.amp.autocast(device_type='cuda', dtype=autocast_dtype):
                     features = encoder(imgs, return_features=True)
                     logits = linear_classifier(features)
-                    loss = criterion(logits, labels)
-                
-                test_loss += loss.item()
-                test_correct += (torch.argmax(logits, dim=1) == labels).sum().item()
+                test_correct += (logits.argmax(1) == labels.to(device)).sum().item()
                 test_total += labels.size(0)
         
-        test_accuracy = test_correct / test_total
-        wandb.log({"epoch": epoch + 1, "train/accuracy": train_correct/train_total, "test/accuracy": test_accuracy})
-        
-        if test_accuracy > best_test_acc:
-            best_test_acc = test_accuracy
-            best_model_path = root_dir / "checkpoints" / cfg.experiment.mode / "best_linear_probe.pth"
-            best_model_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({'epoch': epoch + 1, 'classifier_state_dict': linear_classifier.state_dict(), 'test_accuracy': test_accuracy}, best_model_path)
-    
-    # --- Final Evaluation ---
-    print(f"\n--- Final Evaluation & Confusion Matrix ---")
+        test_acc = test_correct / test_total
+        wandb.log({"epoch": epoch + 1, "test/acc": test_acc, "lr": optimizer.param_groups[0]['lr']})
+
+    # --- Final Confusion Matrix ---
     linear_classifier.eval()
     all_preds, all_labels = [], []
-    
     with torch.no_grad():
-        for imgs, labels in tqdm(test_loader, desc="Final Eval"):
+        for imgs, labels in test_loader:
             if isinstance(imgs, list): imgs = imgs[0]
             imgs = test_aug(imgs.to(device))
-            with torch.amp.autocast(device_type=device.type, enabled=torch.cuda.is_available()):
-                features = encoder(imgs, return_features=True)
-                logits = linear_classifier(features)
-            all_preds.extend(torch.argmax(logits, dim=1).cpu().numpy())
+            logits = linear_classifier(encoder(imgs, return_features=True))
+            all_preds.extend(logits.argmax(1).cpu().numpy())
             all_labels.extend(labels.numpy())
-    
-    class_names = test_loader.dataset.classes if hasattr(test_loader.dataset, 'classes') else test_loader.dataset.dataset.classes
+
     cm = confusion_matrix(all_labels, all_preds)
-    fig, ax = plt.subplots(figsize=(12, 10))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
-    ax.set_title(f'Confusion Matrix (Acc: {best_test_acc:.4f})')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    
-    wandb.log({"final/confusion_matrix": wandb.Image(fig)})
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    wandb.log({"final/cm": wandb.Image(plt)})
     wandb.finish()
 
 if __name__ == "__main__":
     main()
+
