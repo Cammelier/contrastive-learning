@@ -15,6 +15,11 @@ from src.datasets import prepare_loader
 from src.models import SimCLR
 from src.losses import ContrastiveLoss
 
+import warnings
+# Zittisce il warning specifico di torchlars
+warnings.filterwarnings("ignore", message="This overload of add_ is deprecated")
+
+
 # --- GPU/CPU TRANSFORMS ---
 def get_gpu_transforms(device):
     mean = torch.tensor([0.4467, 0.4398, 0.4066])
