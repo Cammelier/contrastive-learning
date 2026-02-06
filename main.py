@@ -17,20 +17,18 @@ from src.losses import ContrastiveLoss
 
 # --- GPU/CPU TRANSFORMS ---
 def get_gpu_transforms(device):
-    # Standard STL-10/CIFAR-10 statistics
     mean = torch.tensor([0.4467, 0.4398, 0.4066])
     std = torch.tensor([0.2603, 0.2566, 0.2713])
     
-    # Training Augmentations (SimCLR recipe)
-    # Optimized to run directly on GPU for maximum throughput
     train_aug = nn.Sequential(
-        K.RandomResizedCrop(size=(96, 96), scale=(0.2, 1.0)),
+        K.RandomResizedCrop(size=(96, 96), scale=(0.08, 1.0)), 
         K.RandomHorizontalFlip(p=0.5),
         K.ColorJitter(0.8, 0.8, 0.8, 0.2, p=0.8),
         K.RandomGrayscale(p=0.2),
         K.RandomGaussianBlur(kernel_size=(9, 9), sigma=(0.1, 2.0), p=0.5),
         K.Normalize(mean=mean, std=std)
     ).to(device)
+
 
     # Validation/Test transformations: standard Resize + CenterCrop + Normalize
     val_aug = nn.Sequential(
@@ -165,8 +163,8 @@ def run_training(cfg, device, model, ckpt_dir):
         total_loss, total_correct, total_samples = 0, 0, 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{total_epochs}")
         
-        # Initial zero_grad outside the loop (using set_to_none for speed)
-        optimizer.zero_grad(set_to_none=True)
+        
+        optimizer.zero_grad()
 
         for i, (imgs, labels) in enumerate(pbar):
             # Compatibility check for multi-view datasets
