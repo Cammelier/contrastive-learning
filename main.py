@@ -190,11 +190,11 @@ def run_training(cfg, device, model, ckpt_dir):
             # Optimizer Step with Gradient Accumulation
             if (i + 1) % accumulation_steps == 0:
                 scaler.step(optimizer)
-                optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad()
 
             # --- ONLINE LINEAR PROBING STEP ---
             if labels.min() >= 0: # Only run if valid labels exist
-                cls_optimizer.zero_grad(set_to_none=True)
+                cls_optimizer.zero_grad()
                 with torch.amp.autocast(device_type='cuda', dtype=dtype):
                     # Detach h to ensure probing doesn't affect encoder learning
                     h_i = h_combined[:imgs.size(0)].detach() 
