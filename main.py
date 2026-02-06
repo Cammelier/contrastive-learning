@@ -70,8 +70,9 @@ def run_validation(model, classifier, val_loader, criterion, device, cfg, val_tr
     avg_acc = (val_correct / val_samples) if val_samples > 0 else 0
     return avg_loss, avg_acc
 
-# --- TRAINING LOOP ---
+
 def run_training(cfg, device, model, ckpt_dir):
+    # --- 1. PREPARAZIONE DATI E AUGMENTATION ---
     train_loader = prepare_loader(cfg, split='train' if cfg.experiment.supervised else 'unlabeled')
     val_loader = prepare_loader(cfg, split='val')
     gpu_aug, gpu_val_aug = get_gpu_transforms(device)
@@ -79,97 +80,102 @@ def run_training(cfg, device, model, ckpt_dir):
     target_bs = 1024
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
-    criterion = ContrastiveLoss(
-        temperature=cfg.experiment.temperature,
-        supervised=cfg.experiment.supervised
-    ).to(device)
+    # --- 2. Weight decay filter
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad: continue
+        if "bias" in name or "bn" in name or "norm" in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
 
- 
-    base_optimizer = torch.optim.SGD(
-        model.parameters(), 
-        lr=cfg.experiment.learning_rate, 
-        momentum=0.9, 
-        weight_decay=cfg.experiment.weight_decay # Usa il weight decay del config, non hardcodato
+    base_optimizer = torch.optim.SGD([
+        {'params': decay_params, 'weight_decay': cfg.experiment.weight_decay},
+        {'params': no_decay_params, 'weight_decay': 0.0}
+    ], lr=cfg.experiment.learning_rate, momentum=0.9)
+
+    optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
+
+    # --- 3. SCHEDULER CON LINEAR WARMUP ---
+    warmup_epochs = 10
+    warmup_sched = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-4, end_factor=1.0, total_iters=warmup_epochs
+    )
+    cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.experiment.epochs - warmup_epochs, eta_min=0
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_epochs]
     )
 
-    
-    optimizer = LARS(
-        optimizer=base_optimizer, 
-        eps=1e-8, 
-        trust_coef=0.001 
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.experiment.epochs)
-
-
-    # Classifier per Online Linear Probing
+    # --- 4. ONLINE LINEAR PROBING ---
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
     classifier = nn.Linear(feat_dim, 10).to(device)
-    cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-3,momentum=0.9) 
+    cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9) # LR leggermente più alto
 
+    # Scaler per Mixed Precision
+    scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
+    criterion = ContrastiveLoss(temperature=cfg.experiment.temperature, supervised=cfg.experiment.supervised).to(device)
+
+    # --- 5. TRAINING LOOP ---
     for epoch in range(cfg.experiment.epochs):
         model.train()
         classifier.train()
         total_loss, total_correct, total_samples = 0, 0, 0
-
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg.experiment.epochs}")
         
         optimizer.zero_grad()
-        cls_optimizer.zero_grad()
 
         for i, (imgs, labels) in enumerate(pbar):
             if isinstance(imgs, list): imgs = imgs[0]
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True).long() 
 
+            # Augmentation su GPU
             with torch.no_grad():
                 x_i = gpu_aug(imgs)
                 x_j = gpu_aug(imgs)
             
-            with torch.amp.autocast(device_type=device.type, enabled=torch.cuda.is_available()):
+            # Forward Encoder
+            with torch.amp.autocast(device_type='cuda', enabled=torch.cuda.is_available()):
                 x_combined = torch.cat([x_i, x_j], dim=0)
                 h_combined, z_combined = model(x_combined)
                 loss = criterion(z_combined, labels if cfg.experiment.supervised else None)
                 scaled_loss = loss / accumulation_steps
             
-            if scaler is not None:
-                scaler.scale(scaled_loss).backward()
-                if (i + 1) % accumulation_steps == 0:
-                    scaler.step(optimizer)
-                    optimizer.zero_grad()
-            else:
-                scaled_loss.backward()
-                if (i + 1) % accumulation_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
+            # Backward Encoder
+            scaler.scale(scaled_loss).backward()
+            
+            if (i + 1) % accumulation_steps == 0:
+                scaler.step(optimizer)
+                optimizer.zero_grad()
 
-            total_loss += loss.item()
-
-            # Aggiornamento Classifier (Linear Probing Online)
+            # --- Online Linear Probing ---
             if labels.min() >= 0:
-                with torch.amp.autocast(device_type=device.type, enabled=torch.cuda.is_available()):
+                cls_optimizer.zero_grad()
+                with torch.amp.autocast(device_type='cuda', enabled=torch.cuda.is_available()):
                     h_i = h_combined[:imgs.size(0)].detach() 
                     logits = classifier(h_i)
                     cls_loss = F.cross_entropy(logits, labels)
 
-                cls_optimizer.zero_grad()
-                if scaler is not None:
-                    scaler.scale(cls_loss).backward()
-                    scaler.step(cls_optimizer)
-                else:
-                    cls_loss.backward()
-                    cls_optimizer.step()
+                scaler.scale(cls_loss).backward()
+                scaler.step(cls_optimizer)
                 
                 preds = logits.argmax(dim=1)
                 total_correct += (preds == labels).sum().item()
                 total_samples += labels.size(0)
 
-            if scaler is not None and (i + 1) % accumulation_steps == 0:
+            # Update finale dello scaler (una volta per batch o step di accumulo)
+            if (i + 1) % accumulation_steps == 0:
                 scaler.update()
 
+            total_loss += loss.item()
             metrics = {'loss': f'{loss.item():.3f}'}
             if total_samples > 0: metrics['acc'] = f'{(total_correct / total_samples):.2%}'
             pbar.set_postfix(metrics)
         
+        # Validazione
         val_loss_avg, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg, gpu_val_aug)
         
         wandb.log({
@@ -183,11 +189,12 @@ def run_training(cfg, device, model, ckpt_dir):
         
         scheduler.step()
 
-    # Salvataggio finale
+    # Salvataggio
     torch.save({
         'model_state_dict': model.state_dict(),
         'classifier_state_dict': classifier.state_dict(),
     }, ckpt_dir / "last_model.pth")
+
 
 # --- TESTING LOOP ---
 def run_testing(cfg, device, model, ckpt_dir):
@@ -200,7 +207,6 @@ def run_testing(cfg, device, model, ckpt_dir):
     test_loader = prepare_loader(cfg, split='test')
     _, gpu_test_aug = get_gpu_transforms(device)
     
-    # Il classificatore deve avere la stessa dimensione usata nel training (512 per ResNet18)
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
     classifier = nn.Linear(feat_dim, 10).to(device) 
     classifier.load_state_dict(checkpoint['classifier_state_dict'])
