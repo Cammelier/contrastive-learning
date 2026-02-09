@@ -247,27 +247,31 @@ def run_training(cfg, device, model, ckpt_dir):
 
 
 
-# --- TESTING LOOP  ---
 def run_testing(cfg, device, model, ckpt_dir):
     print("\n--- STARTING TESTING PHASE ---")
     
-    # 1. Load Checkpoint
-    checkpoint = torch.load(ckpt_dir / "last_model.pth", map_location=device)
+    # 1. Load Checkpoint and restore Backbone weights
+    checkpoint = torch.load(ckpt_dir / "last_model.pth", map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # 2. Setup Classifier
+    # 2. Reconstruct Sequential Classifier to match training architecture keys (0.running_mean, 1.weight)
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
-    classifier = nn.Linear(feat_dim, cfg.data.num_classes).to(device) 
+    classifier = nn.Sequential(
+        nn.BatchNorm1d(feat_dim, affine=False),
+        nn.Linear(feat_dim, cfg.data.num_classes)
+    ).to(device)
+    
+    # Load Classifier weights into the Sequential structure
     classifier.load_state_dict(checkpoint['classifier_state_dict'])
     
     model.eval()
     classifier.eval()
     
-    # 3. Data & Augmentation
+    # 3. Setup Data Loading and GPU-based Augmentation/Normalization
     test_loader = prepare_loader(cfg, split='test')
     _, gpu_test_aug = get_gpu_transforms(device)
     
-    
+    # Enable BF16 for high-performance inference on compatible hardware (e.g., RTX 4090)
     autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     
     correct, total = 0, 0
@@ -280,43 +284,42 @@ def run_testing(cfg, device, model, ckpt_dir):
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True).long() 
 
-            # Augmentation di validazione (es. normalization)
+            # Apply validation-time transformations
             imgs = gpu_test_aug(imgs)
 
-            # Sfrutta i Tensor Cores della 4090 con BF16
             with torch.amp.autocast(device_type='cuda', dtype=autocast_dtype):
-                # Assicurati che return_features=True restituisca l'output corretto
+                # Extract features from the backbone
                 h = model(imgs, return_features=True)
+                # Pass features through the Sequential classifier (BatchNorm + Linear)
                 logits = classifier(h)
                 
             preds = logits.argmax(1)
-            
-            # Accumulo per accuratezza
             correct += (preds == labels).sum().item()
             total += labels.size(0)
             
-            # Accumulo per matrice di confusione
+            # Store data for the Confusion Matrix
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
-    # 5. Metrics & Logging
+    # 5. Metrics Calculation and W&B Logging
     final_acc = 100 * correct / total
     print(f"\n[TEST RESULT] Accuracy: {final_acc:.2f}%")
     
-    # Log su WandB
-    metrics = {"test/accuracy": final_acc / 100}
-    
-    # Generazione automatica Matrice di Confusione su WandB
     class_names = test_loader.dataset.classes if hasattr(test_loader.dataset, 'classes') else None
-    metrics["test/confusion_matrix"] = wandb.plot.confusion_matrix(
-        probs=None,
-        y_true=all_labels,
-        preds=all_preds,
-        class_names=class_names
-    )
+    metrics = {
+        "test/acc": final_acc / 100,
+        "test/confusion_matrix": wandb.plot.confusion_matrix(
+            probs=None,
+            y_true=all_labels,
+            preds=all_preds,
+            class_names=class_names
+        )
+    }
     
     wandb.log(metrics)
     return final_acc
+
+
 
 
 # --- MAIN EXECUTION ---
