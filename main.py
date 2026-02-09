@@ -6,19 +6,23 @@ import torch.nn.functional as F
 import wandb
 import kornia.augmentation as K
 import logging
+import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
 from tqdm import tqdm 
 
+# Assicurati che questi moduli esistano nella tua cartella src
 from src.datasets import prepare_loader
 from src.models import SimCLR
 from src.losses import ContrastiveLoss
+from src.plot import generate_tsne_plot
 
 import warnings
 warnings.filterwarnings("ignore", message="This overload of add_ is deprecated")
 
 
 # --- GPU/CPU TRANSFORMS ---
+
 import torch.nn as nn
 import kornia.augmentation as K
 
@@ -102,7 +106,7 @@ def run_training(cfg, device, model, ckpt_dir):
     # --- 1. DATA PREPARATION ---
     train_loader = prepare_loader(cfg, split='train' if cfg.experiment.supervised else 'unlabeled')
     val_loader = prepare_loader(cfg, split='val')
-    gpu_aug, gpu_val_aug = get_gpu_transforms(cfg,device)
+    gpu_aug, gpu_val_aug = get_gpu_transforms(cfg, device)
 
     # Gradient accumulation setup (2048 for SupCon is much more stable)
     if cfg.experiment.supervised:
@@ -242,16 +246,15 @@ def run_training(cfg, device, model, ckpt_dir):
     return val_acc
 
 
-
-
 def run_testing(cfg, device, model, ckpt_dir):
     print("\n--- STARTING TESTING PHASE ---")
     
     # 1. Load Checkpoint
-    checkpoint = torch.load(ckpt_dir / "last_model.pth", map_location=device, weights_only=False)
+    checkpoint_path = ckpt_dir / "last_model.pth"
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # 2. Setup Classifier
+    # 2. Setup Classifier (BatchNorm + Linear)
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
     classifier = nn.Sequential(
         nn.BatchNorm1d(feat_dim, affine=False),
@@ -270,7 +273,6 @@ def run_testing(cfg, device, model, ckpt_dir):
     
     correct, total = 0, 0
     all_preds, all_labels = [], []
-    all_features = [] # To store backbone features for t-SNE
 
     # 4. Evaluation Loop
     with torch.no_grad():
@@ -282,58 +284,37 @@ def run_testing(cfg, device, model, ckpt_dir):
             imgs = gpu_test_aug(imgs)
 
             with torch.amp.autocast(device_type='cuda', dtype=autocast_dtype):
-                # Extract backbone features (h)
                 h = model(imgs, return_features=True)
                 logits = classifier(h)
                 
-            # Collect data for metrics and t-SNE
-            all_features.append(h.cpu().numpy())
-            all_preds.extend(logits.argmax(1).cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            
-            correct += (logits.argmax(1) == labels).sum().item()
+            preds = logits.argmax(1)
+            correct += (preds == labels).sum().item()
             total += labels.size(0)
+            
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
-    # 5. Metrics Calculation
+    # 5. Accuracy Calculation
     final_acc = 100 * correct / total
     print(f"\n[TEST RESULT] Accuracy: {final_acc:.2f}%")
 
-    # --- 6. t-SNE PLOT GENERATION ---
-    from sklearn.manifold import TSNE
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    import pandas as pd
+    # --- 6. EXTERNAL t-SNE PLOT CALL ---
+    # We call the function from plot.py passing the checkpoint path
+    print("Generating t-SNE plot using plot.py...")
+    experiment_label = f"{cfg.experiment.mode}_acc_{final_acc:.1f}"
+    
+    # generate_tsne_plot saves the image and returns the path
+    tsne_image_path = generate_tsne_plot(
+        ckpt_path=str(checkpoint_path), 
+        base_model=cfg.model.backbone,
+        experiment_name=experiment_label
+    )
 
-    print("Running t-SNE visualization...")
-    features_np = np.concatenate(all_features, axis=0)
-    labels_np = np.array(all_labels)
-    
-    # Standard t-SNE configuration for thesis plots
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42, init='pca', learning_rate='auto')
-    embeds = tsne.fit_transform(features_np)
-    
-    # Mapping STL-10 class names for the legend
-    class_names = test_loader.dataset.classes if hasattr(test_loader.dataset, 'classes') else [str(i) for i in range(10)]
-    df = pd.DataFrame({
-        'x': embeds[:, 0],
-        'y': embeds[:, 1],
-        'label': [class_names[i] for i in labels_np]
-    })
-
-    plt.figure(figsize=(12, 10))
-    sns.scatterplot(data=df, x='x', y='y', hue='label', palette='hls', s=40, alpha=0.7, legend='full')
-    plt.title(f"t-SNE Visualization - {cfg.experiment.mode} (Acc: {final_acc:.2f}%)")
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    
-    # Save locally and log to WandB
-    tsne_path = ckpt_dir / "tsne_plot.png"
-    plt.savefig(tsne_path, dpi=300)
-    
     # 7. Logging to WandB
+    class_names = test_loader.dataset.classes if hasattr(test_loader.dataset, 'classes') else None
     metrics = {
         "test/acc": final_acc / 100,
-        "test/tsne_image": wandb.Image(str(tsne_path)),
+        "test/tsne_image": wandb.Image(tsne_image_path),
         "test/confusion_matrix": wandb.plot.confusion_matrix(
             probs=None,
             y_true=all_labels,
@@ -342,7 +323,6 @@ def run_testing(cfg, device, model, ckpt_dir):
         )
     }
     wandb.log(metrics)
-    plt.close() # Free memory
     
     return final_acc
 
