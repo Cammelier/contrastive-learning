@@ -247,32 +247,30 @@ def run_training(cfg, device, model, ckpt_dir):
 def run_testing(cfg, device, model, ckpt_dir):
     print("\n--- STARTING TESTING PHASE ---")
     
-    # 1. Load Checkpoint and restore Backbone weights
+    # 1. Load Checkpoint
     checkpoint = torch.load(ckpt_dir / "last_model.pth", map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # 2. Reconstruct Sequential Classifier to match training architecture keys (0.running_mean, 1.weight)
+    # 2. Setup Classifier
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
     classifier = nn.Sequential(
         nn.BatchNorm1d(feat_dim, affine=False),
         nn.Linear(feat_dim, cfg.data.num_classes)
     ).to(device)
-    
-    # Load Classifier weights into the Sequential structure
     classifier.load_state_dict(checkpoint['classifier_state_dict'])
     
     model.eval()
     classifier.eval()
     
-    # 3. Setup Data Loading and GPU-based Augmentation/Normalization
+    # 3. Data Loading
     test_loader = prepare_loader(cfg, split='test')
-    _, gpu_test_aug = get_gpu_transforms(device)
+    _, gpu_test_aug = get_gpu_transforms(cfg, device)
     
-    # Enable BF16 for high-performance inference on compatible hardware (e.g., RTX 4090)
     autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     
     correct, total = 0, 0
     all_preds, all_labels = [], []
+    all_features = [] # To store backbone features for t-SNE
 
     # 4. Evaluation Loop
     with torch.no_grad():
@@ -281,30 +279,61 @@ def run_testing(cfg, device, model, ckpt_dir):
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True).long() 
 
-            # Apply validation-time transformations
             imgs = gpu_test_aug(imgs)
 
             with torch.amp.autocast(device_type='cuda', dtype=autocast_dtype):
-                # Extract features from the backbone
+                # Extract backbone features (h)
                 h = model(imgs, return_features=True)
-                # Pass features through the Sequential classifier (BatchNorm + Linear)
                 logits = classifier(h)
                 
-            preds = logits.argmax(1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-            
-            # Store data for the Confusion Matrix
-            all_preds.extend(preds.cpu().numpy())
+            # Collect data for metrics and t-SNE
+            all_features.append(h.cpu().numpy())
+            all_preds.extend(logits.argmax(1).cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            
+            correct += (logits.argmax(1) == labels).sum().item()
+            total += labels.size(0)
     
-    # 5. Metrics Calculation and W&B Logging
+    # 5. Metrics Calculation
     final_acc = 100 * correct / total
     print(f"\n[TEST RESULT] Accuracy: {final_acc:.2f}%")
+
+    # --- 6. t-SNE PLOT GENERATION ---
+    from sklearn.manifold import TSNE
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import pandas as pd
+
+    print("Running t-SNE visualization...")
+    features_np = np.concatenate(all_features, axis=0)
+    labels_np = np.array(all_labels)
     
-    class_names = test_loader.dataset.classes if hasattr(test_loader.dataset, 'classes') else None
+    # Standard t-SNE configuration for thesis plots
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42, init='pca', learning_rate='auto')
+    embeds = tsne.fit_transform(features_np)
+    
+    # Mapping STL-10 class names for the legend
+    class_names = test_loader.dataset.classes if hasattr(test_loader.dataset, 'classes') else [str(i) for i in range(10)]
+    df = pd.DataFrame({
+        'x': embeds[:, 0],
+        'y': embeds[:, 1],
+        'label': [class_names[i] for i in labels_np]
+    })
+
+    plt.figure(figsize=(12, 10))
+    sns.scatterplot(data=df, x='x', y='y', hue='label', palette='hls', s=40, alpha=0.7, legend='full')
+    plt.title(f"t-SNE Visualization - {cfg.experiment.mode} (Acc: {final_acc:.2f}%)")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    
+    # Save locally and log to WandB
+    tsne_path = ckpt_dir / "tsne_plot.png"
+    plt.savefig(tsne_path, dpi=300)
+    
+    # 7. Logging to WandB
     metrics = {
         "test/acc": final_acc / 100,
+        "test/tsne_image": wandb.Image(str(tsne_path)),
         "test/confusion_matrix": wandb.plot.confusion_matrix(
             probs=None,
             y_true=all_labels,
@@ -312,9 +341,11 @@ def run_testing(cfg, device, model, ckpt_dir):
             class_names=class_names
         )
     }
-    
     wandb.log(metrics)
+    plt.close() # Free memory
+    
     return final_acc
+
 
 
 
