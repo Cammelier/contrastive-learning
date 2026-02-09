@@ -10,39 +10,43 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
 from tqdm import tqdm 
 
-# Assicurati che questi moduli esistano nella tua cartella src
 from src.datasets import prepare_loader
 from src.models import SimCLR
 from src.losses import ContrastiveLoss
 
 import warnings
-# Zittisce il warning specifico di torchlars
 warnings.filterwarnings("ignore", message="This overload of add_ is deprecated")
 
 
 # --- GPU/CPU TRANSFORMS ---
-def get_gpu_transforms(device):
-    mean = torch.tensor([0.4467, 0.4398, 0.4066])
-    std = torch.tensor([0.2603, 0.2566, 0.2713])
-    
+import torch.nn as nn
+import kornia.augmentation as K
+
+def get_gpu_transforms(cfg, device):
+    if cfg.experiment.supervised:
+        jitter_params = (0.4, 0.4, 0.4, 0.1)
+        blur_p = 0.0
+    else:
+        jitter_params = (0.8, 0.8, 0.8, 0.2)
+        blur_p = 0.5
+
     train_aug = nn.Sequential(
-        K.RandomResizedCrop(size=(96, 96), scale=(0.08, 1.0)), 
+        K.RandomResizedCrop(size=(96, 96), scale=(0.2, 1.0), p=1.0),
         K.RandomHorizontalFlip(p=0.5),
-        K.ColorJitter(0.8, 0.8, 0.8, 0.2, p=0.8),
+        K.ColorJitter(*jitter_params, p=0.8),
         K.RandomGrayscale(p=0.2),
-        K.RandomGaussianBlur(kernel_size=(9, 9), sigma=(0.1, 2.0), p=0.5),
-        K.Normalize(mean=mean, std=std)
+        K.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0), p=blur_p),
+        K.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]), 
+                    std=torch.tensor([0.229, 0.224, 0.225]))
     ).to(device)
 
-
-    # Validation/Test transformations: standard Resize + CenterCrop + Normalize
     val_aug = nn.Sequential(
-        K.Resize(size=(96, 96)), 
-        K.CenterCrop(size=(96, 96)),
-        K.Normalize(mean=mean, std=std)
+        K.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]), 
+                    std=torch.tensor([0.229, 0.224, 0.225]))
     ).to(device)
 
     return train_aug, val_aug
+
 
 # --- VALIDATION LOOP ---
 def run_validation(model, classifier, val_loader, criterion, device, cfg, val_transform):
@@ -98,7 +102,7 @@ def run_training(cfg, device, model, ckpt_dir):
     # --- 1. DATA PREPARATION ---
     train_loader = prepare_loader(cfg, split='train' if cfg.experiment.supervised else 'unlabeled')
     val_loader = prepare_loader(cfg, split='val')
-    gpu_aug, gpu_val_aug = get_gpu_transforms(device)
+    gpu_aug, gpu_val_aug = get_gpu_transforms(cfg,device)
 
     # Gradient accumulation setup (2048 for SupCon is much more stable)
     if cfg.experiment.supervised:
@@ -140,7 +144,7 @@ def run_training(cfg, device, model, ckpt_dir):
         optimizer, start_factor=1e-4, total_iters=warmup_epochs
     )
     cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_epochs - warmup_epochs, eta_min=0
+        optimizer, T_max=total_epochs - warmup_epochs, eta_min=1e-4
     )
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_epochs]
