@@ -93,17 +93,18 @@ def run_validation(model, classifier, val_loader, criterion, device, cfg, val_tr
 
 def run_training(cfg, device, model, ckpt_dir):
     
-    # Enable Tensor Cores for Float32 matrix multiplications (Significant speedup)
     torch.set_float32_matmul_precision('high')
 
-    # --- 1. DATA PREPARATION & AUGMENTATION ---
-   
+    # --- 1. DATA PREPARATION ---
     train_loader = prepare_loader(cfg, split='train' if cfg.experiment.supervised else 'unlabeled')
     val_loader = prepare_loader(cfg, split='val')
     gpu_aug, gpu_val_aug = get_gpu_transforms(device)
 
-    # Gradient accumulation setup to simulate larger batch sizes (Target: 1024)
-    target_bs = 1024
+    # Gradient accumulation setup (2048 for SupCon is much more stable)
+    if cfg.experiment.supervised:
+        target_bs = 2048 
+    else:
+        target_bs = 1024
     accumulation_steps = max(1, target_bs // cfg.batch_size)
     
     # --- 2. PARAMETER FILTERING (WEIGHT DECAY) ---
@@ -116,43 +117,43 @@ def run_training(cfg, device, model, ckpt_dir):
         else:
             decay_params.append(param)
 
-    # Base optimizer for LARS wrapper
-    base_optimizer = torch.optim.SGD([
+    # Base optimizer components
+    param_groups = [
         {'params': decay_params, 'weight_decay': cfg.experiment.weight_decay},
         {'params': no_decay_params, 'weight_decay': 0.0}
-    ], lr=cfg.experiment.learning_rate, momentum=0.9)
+    ]
 
-    # LARS: Crucial for large batch contrastive learning stability
-    optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
+    # --- 3. OPTIMIZER SELECTION ---
+    if cfg.experiment.supervised:
+        # For SupCon on small labeled sets (STL-10), pure SGD often outperforms LARS
+        optimizer = torch.optim.SGD(param_groups, lr=cfg.experiment.learning_rate, momentum=0.9)
+    else:
+        # LARS is still the best choice for large-scale Unlabeled training
+        base_optimizer = torch.optim.SGD(param_groups, lr=cfg.experiment.learning_rate, momentum=0.9)
+        optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
 
-    # --- 3. SCHEDULER (LINEAR WARMUP + COSINE ANNEALING) ---
+    # --- 4. SCHEDULER ---
     warmup_epochs = 10
     total_epochs = cfg.experiment.epochs
     
-    # Linear warmup prevents early divergence with high learning rates
     warmup_sched = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1e-4, total_iters=warmup_epochs
     )
-    # Cosine decay follows the original SimCLR/MoCo recipe
     cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_epochs - warmup_epochs, eta_min=0
     )
-    # SequentialLR handles the transition between warmup and decay
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_epochs]
     )
 
-    # --- 4. ONLINE LINEAR PROBING ---
-    # Tracks representation quality during training without blocking gradients (using .detach())
+    # --- 5. ONLINE LINEAR PROBING ---
     feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
-    # Sequential head with BN (affine=False) provides a more stable probe
     classifier = nn.Sequential(
         nn.BatchNorm1d(feat_dim, affine=False),
         nn.Linear(feat_dim, 10)
     ).to(device)
     cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9)
 
-    # Mixed Precision Setup: BFloat16 is natively supported and faster on RTX 4090
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
     
@@ -161,45 +162,41 @@ def run_training(cfg, device, model, ckpt_dir):
         supervised=cfg.experiment.supervised
     ).to(device)
 
-    # --- 5. MAIN TRAINING LOOP ---
+    # --- 6. MAIN TRAINING LOOP ---
     for epoch in range(total_epochs):
         model.train()
         classifier.train()
         total_loss, total_correct, total_samples = 0, 0, 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{total_epochs}")
         
-        
         optimizer.zero_grad()
 
         for i, (imgs, labels) in enumerate(pbar):
-            # Compatibility check for multi-view datasets
             if isinstance(imgs, list): imgs = imgs[0]
             imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True).long()
 
-            # GPU-based Data Augmentation
+            # Always use two views for ContrastiveLoss (even in supervised mode)
             with torch.no_grad():
                 x_i, x_j = gpu_aug(imgs), gpu_aug(imgs)
             
-            # --- FORWARD ENCODER (Autocast BF16/FP16) ---
             with torch.amp.autocast(device_type='cuda', dtype=dtype):
-                # Process concatenated views (SimCLR style)
+                # Combined forward for efficiency
                 h_combined, z_combined = model(torch.cat([x_i, x_j], dim=0))
+                
+                # SupCon logic: z_combined (projector output) + labels
                 loss = criterion(z_combined, labels if cfg.experiment.supervised else None)
                 scaled_loss = loss / accumulation_steps
             
-            # Scaled Backward
             scaler.scale(scaled_loss).backward()
             
-            # Optimizer Step with Gradient Accumulation
             if (i + 1) % accumulation_steps == 0:
                 scaler.step(optimizer)
                 optimizer.zero_grad()
 
-            # --- ONLINE LINEAR PROBING STEP ---
-            if labels.min() >= 0: # Only run if valid labels exist
+            # Online Linear Probing (Training the classifier head)
+            if labels.min() >= 0: 
                 cls_optimizer.zero_grad()
                 with torch.amp.autocast(device_type='cuda', dtype=dtype):
-                    # Detach h to ensure probing doesn't affect encoder learning
                     h_i = h_combined[:imgs.size(0)].detach() 
                     logits = classifier(h_i)
                     cls_loss = F.cross_entropy(logits, labels)
@@ -207,11 +204,9 @@ def run_training(cfg, device, model, ckpt_dir):
                 scaler.scale(cls_loss).backward()
                 scaler.step(cls_optimizer)
                 
-                # Internal Accuracy Tracking
                 total_correct += (logits.argmax(1) == labels).sum().item()
                 total_samples += labels.size(0)
 
-            # Scaler update after all optimizer steps in the current iteration
             if (i + 1) % accumulation_steps == 0:
                 scaler.update()
 
@@ -221,7 +216,6 @@ def run_training(cfg, device, model, ckpt_dir):
                 'acc': f'{(total_correct/total_samples if total_samples>0 else 0):.2%}'
             })
         
-        # --- VALIDATION & LOGGING ---
         val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg, gpu_val_aug)
         
         wandb.log({
@@ -233,17 +227,16 @@ def run_training(cfg, device, model, ckpt_dir):
             "lr": optimizer.param_groups[0]['lr']
         })
         
-        # Step the scheduler after each epoch
         scheduler.step()
 
-    # --- FINAL CHECKPOINT SAVE ---
     torch.save({
         'model_state_dict': model.state_dict(),
         'classifier_state_dict': classifier.state_dict(),
         'epoch': total_epochs
     }, ckpt_dir / "last_model.pth")
     
-    print(f"Training Complete. Model saved to {ckpt_dir}")
+    return val_acc
+
 
 
 
@@ -318,7 +311,6 @@ def run_testing(cfg, device, model, ckpt_dir):
     
     wandb.log(metrics)
     return final_acc
-
 
 
 
