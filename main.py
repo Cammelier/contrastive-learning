@@ -62,13 +62,13 @@ def run_validation(engine, val_loader, device, cfg):
     return val_loss / len(val_loader), val_correct / val_samples if val_samples > 0 else 0
 
 # --- TRAINING MAIN ---
-def run_training(cfg: DictConfig, device, ckpt_dir: Path):
+def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
     # 1. DATA
     train_loader, _ = prepare_loader(cfg, 'train' if cfg.experiment.supervised else 'unlabeled')
     val_loader, class_names = prepare_loader(cfg, 'val')
     
     # 2. MODEL
-    model = NetflowSimCLR(
+    model = SimCLR(
         input_dim=cfg.data.input_dim,
         hidden_dim=cfg.model.hidden_dim,
         out_dim=cfg.model.out_dim,
