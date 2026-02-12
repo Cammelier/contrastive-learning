@@ -1,10 +1,10 @@
 import hydra 
 import torch 
-from torchlars import LARS
+from pytorch_lightning.optimizers.lars import LARS 
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-import kornia.augmentation as K
+
 import logging
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
@@ -22,10 +22,6 @@ warnings.filterwarnings("ignore", message="This overload of add_ is deprecated")
 
 
 # --- GPU/CPU TRANSFORMS ---
-
-import torch.nn as nn
-import kornia.augmentation as K
-
 def get_gpu_transforms(cfg, device):
     if cfg.experiment.supervised:
         jitter_params = (0.4, 0.4, 0.4, 0.1)
