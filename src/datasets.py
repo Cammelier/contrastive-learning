@@ -22,20 +22,14 @@ class NetFlowDataset(Dataset):
             print(f"Loaded {split} split: {len(df)} samples")
         else:
             print(f"No 'split' column, using full dataset: {len(df)} samples")
+    
         
-        # 2. Preprocessing minimo 
-        df = rare_category_filter(df, cfg_data.cat_cols, cfg_data.min_cat_count)
-        df = df.query(cfg_data.filter_query) if cfg_data.filter_query else df
-        df = df[df[cfg_data.label_col] != cfg_data.benign_tag]  
-        
-        print(f"Dataset '{cfg_data.name}' ({split}): {len(df)} samples after filtering")
-        
-        # 3. Encoding categoriche
+        # 2. Encoding categoriche
         encoder = TopNCategoryEncoder(cfg_data.top_n_categories)
         cat_encoded = encoder.fit_transform(df[cfg_data.cat_cols]) 
         df[cfg_data.cat_cols] = cat_encoded 
         
-        # 4. Label Encoding 
+        # 3. Label Encoding 
         label_col_processed = f"multi_{cfg_data.label_col}"
         if label_col_processed in df.columns:
             labels = df[label_col_processed].values.astype(np.int64)
@@ -52,7 +46,7 @@ class NetFlowDataset(Dataset):
         else:
             num_features = np.zeros((len(df), len(cfg_data.num_cols)))  
         
-        # 6. Final features
+        # 4. Final features
         self.features = np.hstack([
             num_features, 
             df[cfg_data.cat_cols].values.astype(np.float32)
