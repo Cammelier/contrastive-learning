@@ -23,7 +23,6 @@ logger:
 
 hydra:
   run:
-    dir: .
   output_subdir: null
   job:
     chdir: False
