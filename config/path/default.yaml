@@ -1,0 +1,7 @@
+out_base_path: resources/outputs/${data.name}/${name}
+
+raw_data: resources/raw_data/dataset_v2
+processed_data: ${path.out_base_path}/processed_data
+models: ${path.out_base_path}/models
+logs: resources/outputs/logs/${seed}/${data.name}/${name}
+checkpoints: ${path.out_base_path}/checkpoints
