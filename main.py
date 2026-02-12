@@ -195,9 +195,9 @@ def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else 'cpu')
     torch.manual_seed(cfg.seed)
     
-    wandb.init(project=cfg.logger.project, config=OmegaConf.to_container(cfg))
+    wandb.init(project=cfg.logger.wandb.project, config=OmegaConf.to_container(cfg))
     
-    model = NetflowSimCLR(
+    model = SimCLR(
         input_dim=cfg.data.input_dim,  
         hidden_dim=cfg.model.hidden_dim,
         out_dim=cfg.model.out_dim
