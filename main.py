@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
 from tqdm import tqdm 
 from torch.amp import autocast, GradScaler
+from src.common.logging import setup_logger
 
 from src.datasets import prepare_loader
 from src.models import SimCLR
@@ -64,7 +65,7 @@ def run_validation(engine, val_loader, device, cfg):
 # --- TRAINING MAIN ---
 def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
     # 1. DATA
-    train_loader, _ = prepare_loader(cfg, 'train' if cfg.experiment.supervised else 'unlabeled')
+    train_loader, _ = prepare_loader(cfg, 'train')
     val_loader, class_names = prepare_loader(cfg, 'val')
     
     # 2. MODEL
@@ -185,6 +186,8 @@ def run_testing(cfg: DictConfig, device, model, ckpt_dir: Path):
     print(f"TEST ACC: {acc:.2f}%")
     wandb.log({'test/acc': acc})
     return acc
+
+setup_logger() 
 
 @hydra.main(version_base="1.2", config_path="config", config_name="configuratore")
 def main(cfg: DictConfig):
