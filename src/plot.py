@@ -79,7 +79,7 @@ if __name__ == "__main__":
     cfg = OmegaConf.create({
         'data': {
             'csv_path': './data/cic_2018_v2.csv',
-            'feature_cols': [...],  # da 01_NetFlow_v2_Features.csv
+            'feature_cols': [...], 
             'label_col': 'label',
             'batch_size': 512
         }

@@ -38,7 +38,7 @@ def preprocess_df(
     num_cols = list(cfg.data.num_cols)
     cat_cols = list(cfg.data.cat_cols)
     label_col = cfg.data.label_col
-    benign_tag = cfg.data.benign_tagx
+    benign_tag = cfg.data.benign_tag
     query = cfg.data.filter_query
     min_cat_count = cfg.data.min_cat_count
     top_n_categories = cfg.data.top_n_categories
