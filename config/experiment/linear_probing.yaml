@@ -1,0 +1,25 @@
+
+mode: linear_probe
+stage: testing  
+
+
+data: cic_2018_v2  
+
+# Linear Probe Hyperparams
+linear_probe_lr: 0.1
+linear_probe_epochs: 30
+linear_probe_weight_decay: 0.0
+
+# Checkpoint 
+auto_last_checkpoint: true  
+checkpoint_path: null
+
+# Logging
+logger:
+  project: "netflow-contrastive"
+  entity: null
+
+
+seed: 42
+device: cuda
+batch_size: 1024  

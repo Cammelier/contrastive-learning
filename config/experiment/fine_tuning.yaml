@@ -1,0 +1,8 @@
+
+mode: finetuning
+data: cic_2018_v2
+ft_lr_backbone: 1e-5
+ft_lr_head: 1e-4
+weight_decay: 0.05
+epochs: 50
+batch_size: 1024
