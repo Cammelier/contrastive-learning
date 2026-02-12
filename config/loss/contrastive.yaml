@@ -1,0 +1,3 @@
+_target_: src.losses.ContrastiveLoss
+temperature: 0.1
+supervised: false

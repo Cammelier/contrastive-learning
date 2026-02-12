@@ -1,0 +1,5 @@
+_target_: torch.optim.lr_scheduler.OneCycleLR
+max_lr: ${optimizer.lr}
+epochs: ${experiment.epochs}
+steps_per_epoch: 1000  # approx
+pct_start: 0.1
