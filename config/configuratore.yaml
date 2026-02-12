@@ -2,7 +2,7 @@ defaults:
   - data: cic_2018_v2            
   - model: netflow_contrastive   
   - loss: contrastive            
-  - optimizer: lars              
+  - optimizer: adamw             
   - scheduler: cosine_warmup
   - experiment: self_supervised
   - _self_
