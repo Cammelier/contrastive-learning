@@ -1,23 +1,22 @@
-defaults: 
- - data: stl10
- - model: resnet_simclr
- - experiment: self_supervised
- - _self_
+defaults:
+  - data: cic_2018_v2            
+  - model: netflow_contrastive   
+  - loss: contrastive            
+  - optimizer: lars              
+  - scheduler: cosine_warmup
+  - experiment: self_supervised
+  - path: default
+  - _self_
 
 seed: 42
-device: "cuda"
-epochs: 150
-batch_size: 512
-num_workers: 16
+name: selfsup_cic2018
+device: cuda
+run_id: 0
 stage: all
 
-checkpoint_path: null  
-auto_last_checkpoint: True
-
-model_config:
-  out_dim: 128     
-  hidden_dim: 512  
-
-logger:
-  project: "contrastive_learning"
-  group: ${experiment.mode}
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: False

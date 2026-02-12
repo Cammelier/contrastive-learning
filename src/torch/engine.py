@@ -11,29 +11,37 @@ class ContrastiveEngine:
         self.criterion = criterion
         self.cfg = cfg
         self.device = torch.device(cfg.device)
-
-        # Mixed precision scaler
         self.scaler = GradScaler(enable=cfg.model.use_mixed_precision)
+        self.aug_fn = self.cfg.augmentation.aug_fn
+
+    def make_views(self,x):
+        if self.aug_fn is not None:
+            x_i, x_j = self.aug_fn(x)
+        else: 
+            noise_scale = 0.01
+            x_i = x + noise_scale * torch.randn_like(x)
+            x_j = x + noise_scale * torch.randn_like(x)
+        return x_i, x_j
 
     def train_step(self,batch):
         self.model.train()
 
         # imgs is a list of two tensors [batch, 3, 96, 96]
-        imgs, labels = batch 
+        x, labels = batch 
 
-        images = torch.cat(imgs, dim=0).to(self.device,non_blocking=True )  # Concatenate along batch dimension
+        x = x.to(self.device, non_blocking=True )
         labels = labels.to(self.device,non_blocking=True )
 
         self.optimizer.zero_grad()
 
         # Mixed precision use float16 to save up memory
         with autocast(enabled=self.cfg.model.use_mixed_precision):
-           # Forward pass
-           _, z= self.model(images)
+         
+           x_i, x_j = self.make_views(x)  # Create two augmented views of the input
 
-           # Divided output in two parts
-           z_i, z_j = torch.split(z, z.shape[0] // 2, dim=0)
-           z_combined = torch.stack([z_i, z_j], dim=1)  # Shape: [batch_size, 2,  out_dim]
+           # Forward pass
+           h_combined, z_combined = self.model(torch.cat([x_i, x_j], dim=0))  # Concatenate along batch dimension
+
 
            # Calculate loss: Supervised (SupCon) or Self_supervised(SimCLR)
            if self.cfg.experiments_type == 'supervised':
@@ -51,17 +59,13 @@ class ContrastiveEngine:
     def eval_step(self, batch):
         self.model.eval()
 
-        imgs, labels = batch 
-        imgs = torch.cat(imgs, dim=0).to(self.device,non_blocking=True )  # Concatenate along batch dimension
+        x, labels = batch 
+        x = x.to(self.device, non_blocking=True)
         labels = labels.to(self.device,non_blocking=True )
 
         with autocast(enabled=self.cfg.model.use_mixed_precision):
-           # Forward pass
-           _, z= self.model(images)
-
-           # Divided output in two parts
-           z_i, z_j = torch.split(z, z.shape[0] // 2, dim=0)
-           z_combined = torch.stack([z_i, z_j], dim=1)  # Shape: [batch_size, 2,  out_dim]
+           x_i, x_j = self.make_views(x)  # Create two augmented views of the input
+           _, z_combined = self.model(torch.cat([x_i, x_j], dim=0))  # Concatenate along batch dimension
 
            # Calculate loss: Supervised (SupCon) or Self_supervised(SimCLR)
            if self.cfg.experiments_type == 'supervised':

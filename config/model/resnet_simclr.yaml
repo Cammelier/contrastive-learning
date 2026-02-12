@@ -1,5 +1,5 @@
-name: resnet18_contrastive
-backbone: resnet18
+name: netflow_contrastive
+backbone: mlp
 out_dim: 128
 projection_head:
   type: mlp
