@@ -84,7 +84,7 @@ def prepare_loader(cfg, split='train'):
     # Craete dataset 
     full_dataset = NetFlowDataset(
         name=cfg_data.name,
-        filename=cfg_data.filename,
+        filename=cfg_data.file_name,
         extension=cfg_data.extension,
         label_col=cfg_data.label_col,
         num_cols=cfg_data.numcols,
