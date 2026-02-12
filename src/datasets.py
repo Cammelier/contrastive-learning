@@ -1,129 +1,77 @@
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 import pandas as pd
-import pyarrow.parquet as pq
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+# ← I/O + Preprocessing
+from src.data.io import load_df
+from src.data.preprocessing import rare_category_filter, TopNCategoryEncoder, ml_split
+
 class NetFlowDataset(Dataset):
-    def __init__(self, name, filename, extension='parquet', label_col='Attack', 
-                 num_cols=None, cat_cols=None, benigntag='Benign', 
-                 trainfrac=0.8, valfrac=0.1, testfrac=0.1, 
-                 filter_query=None, mincatcount=100, topncategories=32,
-                 seed=42, transform=None):
+    def __init__(self, cfg_data, split='train', seed=42, transform=None):
+        # 1. Carica Parquet con io.py (cic_2018_v2.parquet)
+        df = load_df(f"data/{cfg_data.file_name}.parquet")
         
+        # 2. Preprocessing pipeline
+        df = rare_category_filter(df, cfg_data.cat_cols, cfg_data.min_cat_count)
+        df = df.query(cfg_data.filter_query) if cfg_data.filter_query else df
+        df = df[df[cfg_data.label_col] != cfg_data.benign_tag]  
         
-        data_path = f"data/{filename}.{extension}"
-        if extension == 'parquet':
-            df = pq.read_table(data_path).to_pandas()
-        else:
-            df = pd.read_csv(data_path)
+        print(f"Dataset '{cfg_data.name}': {len(df)} samples after filtering")
         
-        #
-        if filter_query:
-            df = df.query(filter_query)
-        if benigntag:
-            df = df[df[label_col] != benigntag]
+        # 3. Encoding categoriche (TopN da preprocessing.py)
+        encoder = TopNCategoryEncoder(cfg_data.top_n_categories)
+        df[cfg_data.cat_cols] = encoder.fit_transform(df[cfg_data.cat_cols])
         
-        print(f"Dataset '{name}': {len(df)} samples after filtering")
-        
-        # 🎯 Encoding label
+        # 4. Label Encoding
         le = LabelEncoder()
-        self.labels = le.fit_transform(df[label_col]).astype(np.int64)
+        labels = le.fit_transform(df[cfg_data.label_col]).astype(np.int64)
         self.class_names = le.classes_
-        self.num_classes = len(self.class_names)
         
-        # features → StandardScaler
-        if num_cols:
-            self.num_scaler = StandardScaler()
-            df[num_cols] = self.num_scaler.fit_transform(df[num_cols])
-            num_features = df[num_cols].values.astype(np.float32)
-        else:
-            num_features = np.empty((len(df), 0))
+        # 5. Numeriche + StandardScaler
+        scaler = StandardScaler()
+        num_features = scaler.fit_transform(df[cfg_data.num_cols]).astype(np.float32)
         
-        # CATEGORICAL → Top-N encoding
-        cat_features = []
-        if cat_cols:
-            for col in cat_cols:
-                vc = df[col].value_counts()
-                top_cats = vc.head(topncategories).index
-                # Mappa a indici 0..top_n-1, resto → 0
-                mapping = {cat: i+1 for i, cat in enumerate(top_cats)}
-                df[f"{col}_enc"] = df[col].map(mapping).fillna(0).astype(np.int64)
-                if col in vc[vc >= mincatcount].index:
-                    cat_features.append(f"{col}_enc")
+        # 6. Final features
+        self.features = np.hstack([
+            num_features, 
+            df[cfg_data.cat_cols].values.astype(np.float32)
+        ])
+        self.labels = labels
         
-        # Final features = num + cat_encoded
-        if cat_features:
-            self.feature_cols = num_cols + cat_features
-            cat_part = df[cat_features].values.astype(np.float32)
-            self.features = np.hstack([num_features, cat_part])
-        else:
-            self.feature_cols = num_cols
-            self.features = num_features
+        print(f"Features: {self.features.shape[1]} (29 num + 11 cat)")
+        print(f"Classes: {len(self.class_names)}")
         
-        print(f"Features: {self.features.shape[1]} (num:{num_features.shape[1]}, cat:{len(cat_features)})")
-        print(f"Classes: {self.num_classes}")
+        # 7. Split 80/10/10
+        self.train_df, self.val_df, self.test_df = ml_split(
+            df.assign(features=self.features, labels=labels),
+            cfg_data.train_frac, cfg_data.val_frac, cfg_data.test_frac,
+            cfg_data.label_col, seed
+        )
         
         self.transform = transform
 
-    def __len__(self):
-        return len(self.features)
-
+    def __len__(self): return len(self.features)
     def __getitem__(self, idx):
         x = torch.from_numpy(self.features[idx])
         y = torch.tensor(self.labels[idx], dtype=torch.long)
-        if self.transform:
-            x = self.transform(x)
+        if self.transform: x = self.transform(x)
         return x, y
 
 def prepare_loader(cfg, split='train'):
-    """Carica da YAML Hydra."""
     cfg_data = cfg.data
-    
-    # Craete dataset 
-    full_dataset = NetFlowDataset(
-        name=cfg_data.name,
-        filename=cfg_data.file_name,
-        extension=cfg_data.extension,
-        label_col=cfg_data.label_col,
-        num_cols=cfg_data.num_cols,
-        cat_cols=cfg_data.cat_cols,
-        benigntag=cfg_data.benign_tag,
-        trainfrac=cfg_data.train_frac,
-        valfrac=cfg_data.val_frac,
-        testfrac=cfg_data.test_frac,
-        filter_query=getattr(cfg_data, 'filter_query', None),
-        mincatcount=getattr(cfg_data, 'mincatcount', 100),
-        topncategories=getattr(cfg_data, 'topncategories', 32),
-        seed=cfg.seed
-    )
+    dataset = NetFlowDataset(cfg_data, split, cfg.seed)
     
     
-    lengths = [cfg_data.trainfrac, cfg_data.valfrac, cfg_data.testfrac]
-    lengths = [int(len(full_dataset) * f) for f in lengths]
-    lengths[-1] = len(full_dataset) - sum(lengths[:-1])  # adjust test
-    
-    g = torch.Generator().manual_seed(cfg.seed)
-    splits = random_split(full_dataset, lengths, generator=g)
-    
-    datasets = {'train': splits[0], 'val': splits[1], 'test': splits[2]}
-    
-    # Loader
-    if split == 'train' or split == 'unlabeled':
-        ds = datasets['train']
-        shuffle, drop_last = True, True
+    if split == 'train':
+        ds = dataset.train_ds
     elif split == 'val':
-        ds = datasets['val']
-        shuffle, drop_last = False, False
+        ds = dataset.val_ds
     else:
-        ds = datasets['test']
-        shuffle, drop_last = False, False
-    
-    loader = DataLoader(
-        ds, batch_size=cfg.batch_size, shuffle=shuffle,
-        num_workers=cfg.data.num_workers, pin_memory=True, drop_last=drop_last
-    )
-    
-    return loader, full_dataset.class_names
-
+        ds = dataset.test_ds
+        
+    return DataLoader(
+        ds, batch_size=cfg.batch_size, shuffle=(split=='train'),
+        num_workers=cfg.data.num_workers, pin_memory=True
+    ), dataset.class_names
