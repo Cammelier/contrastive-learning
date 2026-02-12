@@ -166,9 +166,22 @@ def main() -> None:
             / f"{cfg.data.file_name}_{split_name}.{cfg.data.extension}"
         )
         save_df(split_df, str(output_path))
-        logger.info(f"Saved {split_name} data: {len(split_df)} samples")
+    logger.info(f"Saved {split_name} data: {len(split_df)} samples")
 
-    logger.info("Data preparation complete!")
+
+    data_dir = Path("data")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    full_df = pd.concat([
+    train_df.assign(split='train'),
+    val_df.assign(split='val'),
+    test_df.assign(split='test')
+    ])
+    full_path = data_dir / f"{cfg.data.file_name}.{cfg.data.extension}"
+    save_df(full_df, str(full_path))
+    
+
+logger.info("Data preparation complete!")
+
 
 
 if __name__ == "__main__":
