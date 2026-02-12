@@ -9,7 +9,7 @@ torchaudio>=2.0.0
 kornia # Added for GPU-accelerated data augmentations
 
 # Optimizers (Specific for Large Batch Training)
-torchlars # Added for LARS optimizer implementation
+pytorch-lightning>=2.1.0
 
 # Configuration Management
 hydra-core>=1.3.2
@@ -38,3 +38,10 @@ jupyter>=1.0.0
 ipython>=8.12.0
 black>=23.0.0
 pytest>=7.3.0
+
+# Data Handling (NetFlow Parquet)
+pyarrow>=12.0.0       
+polars>=0.20.0       
+
+# Augmentations Tabellari 
+torch-audiomentations  
