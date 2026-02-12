@@ -2,8 +2,9 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import LabelEncoder, StandardScaler
 from pathlib import Path
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
 
 # ← I/O + Preprocessing
 from src.data.io import load_df
