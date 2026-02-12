@@ -189,7 +189,7 @@ def run_testing(cfg: DictConfig, device, model, ckpt_dir: Path):
 
 setup_logger() 
 
-@hydra.main(version_base="1.2", config_path="config", config_name="configuratore")
+@hydra.main(version_base="1.2", config_path="config", config_name="config")
 def main(cfg: DictConfig):
     root_dir = Path(hydra.utils.get_original_cwd())
     ckpt_dir = root_dir / f"checkpoints/{cfg.experiment.mode}"
