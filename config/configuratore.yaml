@@ -13,6 +13,13 @@ device: cuda
 run_id: 0
 stage: all
 
+logger:
+  wandb:
+    project: contrastive_learning_netflow
+    entity: Carmine 
+    offline: false
+    id: ${run_id}
+
 hydra:
   run:
     dir: .
