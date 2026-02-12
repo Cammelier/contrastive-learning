@@ -10,7 +10,7 @@ from src.data.preprocessing import rare_category_filter, TopNCategoryEncoder, ml
 
 class NetFlowDataset(Dataset):
     def __init__(self, cfg_data, split='train', seed=42, transform=None):
-        # 1. Carica Parquet con io.py (cic_2018_v2.parquet)
+        # 1. Load dataset
         df = load_df(f"data/{cfg_data.file_name}.parquet")
         
         # 2. Preprocessing pipeline
