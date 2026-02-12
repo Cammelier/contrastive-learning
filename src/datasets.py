@@ -61,7 +61,8 @@ class NetFlowDataset(Dataset):
             df[cat_cols].values.astype(np.float32)
         ])
         self.labels = labels
-        print(np.unique(self.labels))
+        self.labels = (self.labels > 0).astype(np.int64) 
+        self.class_names = ['Benign', 'Attack']
         
         print(f"Features: {self.features.shape[1]} ({len(num_cols)} num + {len(cat_cols)} cat)")
         print(f"Classes: {len(self.class_names)}")

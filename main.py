@@ -68,12 +68,15 @@ def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
     train_loader, _ = prepare_loader(cfg, 'train')
     val_loader, class_names = prepare_loader(cfg, 'val')
     
+    num_classes = len(np.unique(train_loader.dataset.labels))
+    print(f"Dataset detected: {num_classes} classes.")
+
     # 2. MODEL
     model = SimCLR(
         input_dim=cfg.data.input_dim,
         hidden_dim=cfg.model.hidden_dim,
         out_dim=cfg.model.out_dim,
-        num_classes=len(class_names) if cfg.experiment.supervised else None
+        num_classes=num_classes if cfg.experiment.supervised else None
     ).to(device)
     
     # 3. OPTIMIZER AdamW 
@@ -104,7 +107,7 @@ def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
     feat_dim = cfg.model.hidden_dim
     classifier = nn.Sequential(
         nn.BatchNorm1d(feat_dim),
-        nn.Linear(feat_dim, len(class_names))
+        nn.Linear(feat_dim, num_classes)
     ).to(device)
     cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9)
     
