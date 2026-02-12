@@ -15,7 +15,7 @@ stage: all
 
 logger:
   wandb:
-    project: contrastive_learning_netflow
+    project: contrastive_learning
     entity: Carmine 
     offline: false
     id: ${run_id}
