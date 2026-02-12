@@ -5,6 +5,7 @@ defaults:
   - optimizer: adamw             
   - scheduler: cosine_warmup
   - experiment: self_supervised
+  - batch_size: 1024
   - path: default 
   - _self_
 
