@@ -4,26 +4,23 @@ import torch.nn.functional as F
 from torchvision.models import resnet18, resnet50
 
 class SimCLR(nn.Module):
-    def __init__(self, base_model: str = 'resnet18', out_dim: int = 128, num_classes: int = None):
+    def __init__(self, input_dim: int, out_dim: int = 128, hidden_dim: int = 512, num_classes: int = None):
         super().__init__()
         
-        # 1. Initialize Backbone
-        if base_model == 'resnet18':
-            self.backbone = resnet18(weights=None)
-            # Modify for STL-10 (96x96): kernel 3x3 and no maxpool to keep spatial resolution
-            self.backbone.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-            self.backbone.maxpool = nn.Identity()
-        elif base_model == 'resnet50':
-            self.backbone = resnet50(weights=None)
-            # Modify for STL-10: first conv 3x3 to preserve features from 96x96 images
-            self.backbone.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-            # Note: ResNet50 usually keeps maxpool, but can be replaced if resolution drops too fast
-        else:
-            raise ValueError(f"Backbone {base_model} not supported")
+        # 1. Backbone: MLP 
+        self.backbone = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(input_dim,hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+        
 
         # Capture feature dimension before removing the original FC layer
-        dim_mlp = self.backbone.fc.in_features
-        self.backbone.fc = nn.Identity()
+        dim_mlp = hidden_dim
+        
 
         # 2. Projection Head (MLP) 
         # Crucial for SupCon/SimCLR: maps features to a latent space for the contrastive loss
@@ -37,7 +34,6 @@ class SimCLR(nn.Module):
         
         self.num_classes = num_classes 
         # 3. Classifier Head
-        # Used for online linear probing during training and final inference
         if num_classes is not None:
             self.classifier = nn.Linear(dim_mlp, num_classes) 
         else: 
@@ -55,11 +51,10 @@ class SimCLR(nn.Module):
         if return_features:
             return h
             
+        z = self.projection(h) 
+
         if not self.training and self.num_classes is not None:
             return self.classifier(h)
 
-        z = self.projection(h)
-        
-        
         return h, z
 
