@@ -6,7 +6,7 @@ from omegaconf import DictConfig
 
 
 def load_config(
-    config_path: str = "configs",
+    config_path: str = "config",
     config_name: str = "config",
     overrides: Optional[List[str]] = None,
 ) -> DictConfig:
@@ -84,7 +84,7 @@ def load_config_from_dir(
 
 
 def load_config_relative(
-    config_path: str = "configs",
+    config_path: str = "config",
     config_name: str = "config",
     overrides: Optional[List[str]] = None,
 ) -> DictConfig:
