@@ -1,0 +1,5 @@
+_target_: src.models.NetflowSimCLR
+input_dim: 40      
+hidden_dim: 512
+out_dim: 128
+num_classes: null  
