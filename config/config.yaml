@@ -5,7 +5,6 @@ defaults:
   - optimizer: adamw             
   - scheduler: cosine_warmup
   - experiment: self_supervised
-  - batch_size: 1024
   - path: default 
   - _self_
 
@@ -14,6 +13,7 @@ name: selfsup_cic2018
 device: cuda
 run_id: 0
 stage: all
+batch_size: 1024
 
 logger:
   wandb:
