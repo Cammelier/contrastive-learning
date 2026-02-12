@@ -1,360 +1,214 @@
 import hydra 
 import torch 
-from pytorch_lightning.optimizers.lars import LARS 
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-
 import logging
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path 
 from tqdm import tqdm 
+from torch.amp import autocast, GradScaler
 
-# Assicurati che questi moduli esistano nella tua cartella src
 from src.datasets import prepare_loader
 from src.models import SimCLR
 from src.losses import ContrastiveLoss
+
 from src.plot import generate_tsne_plot
 
 import warnings
-warnings.filterwarnings("ignore", message="This overload of add_ is deprecated")
+warnings.filterwarnings("ignore")
 
+# --- NETFLOW AUGMENTATIONS ---
+def netflow_aug(x, noise_strength=0.02, drop_prob=0.1):
+    """Genera 2 viste per vettori NetFlow [B, features]"""
+    noise = noise_strength * torch.randn_like(x)
+    
+    # Vista 1: 10% feature dropout + noise
+    mask1 = torch.rand_like(x) > drop_prob
+    x_i = x * mask1 + noise * (~mask1)
+    
+    # Vista 2: 15% diverso + noise
+    mask2 = torch.rand_like(x) > (drop_prob + 0.05)
+    x_j = x * mask2 + noise * (~mask2)
+    
+    return x_i, x_j
 
-# --- GPU/CPU TRANSFORMS ---
-def get_gpu_transforms(cfg, device):
-    if cfg.experiment.supervised:
-        jitter_params = (0.4, 0.4, 0.4, 0.1)
-        blur_p = 0.0
-    else:
-        jitter_params = (0.8, 0.8, 0.8, 0.2)
-        blur_p = 0.5
-
-    train_aug = nn.Sequential(
-        K.RandomResizedCrop(size=(96, 96), scale=(0.2, 1.0), p=1.0),
-        K.RandomHorizontalFlip(p=0.5),
-        K.ColorJitter(*jitter_params, p=0.8),
-        K.RandomGrayscale(p=0.2),
-        K.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0), p=blur_p),
-        K.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]), 
-                    std=torch.tensor([0.229, 0.224, 0.225]))
-    ).to(device)
-
-    val_aug = nn.Sequential(
-        K.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]), 
-                    std=torch.tensor([0.229, 0.224, 0.225]))
-    ).to(device)
-
-    return train_aug, val_aug
-
-
-# --- VALIDATION LOOP ---
-def run_validation(model, classifier, val_loader, criterion, device, cfg, val_transform):
-    """
-    Evaluates both the contrastive loss and the online linear probe performance.
-    Optimized for RTX 4090 using BFloat16.
-    """
-    model.eval()
-    classifier.eval()
+# --- VALIDATION (NetFlow) ---
+def run_validation(engine, val_loader, device, cfg):
+    engine.model.eval()
     val_loss, val_correct, val_samples = 0, 0, 0
     
-    # Use BFloat16 if supported 
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     
     with torch.no_grad():
-        for imgs, labels in val_loader:
-            # Handle list of images (multi-view) if returned by the loader
-            if isinstance(imgs, list): imgs = imgs[0]
+        for x, labels in val_loader:
+            x, labels = x.to(device), labels.to(device).long()
             
-            imgs = imgs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True).long() 
-            
-            # Fast GPU-side normalization
-            x_val = val_transform(imgs)
-            
-            # Inference using mixed precision
-            with torch.amp.autocast(device_type='cuda', dtype=dtype):
-                h_i, z_i = model(x_val)
-                
-                # Contrastive Loss (Supervised or Self-Supervised)
-                loss = criterion(z_i, labels if cfg.experiment.supervised else None)
+            with autocast(device_type='cuda', dtype=dtype):
+                x_i, x_j = netflow_aug(x)
+                _, z_combined = engine.model(torch.cat([x_i, x_j], dim=0))
+                loss = engine.criterion(z_combined, labels if cfg.experiment.supervised else None)
                 val_loss += loss.item()
-
-                # Accuracy tracking for Online Linear Probing
+                
+                # Linear probing acc
                 if labels.min() >= 0:
-                    # Detach features to ensure evaluation doesn't track gradients
-                    logits = classifier(h_i.detach()) 
+                    h_i = engine.model.backbone(torch.cat([x_i, x_j], dim=0))[:x.size(0)]
+                    logits = engine.classifier(h_i)
                     preds = logits.argmax(1)
                     val_correct += (preds == labels).sum().item()
                     val_samples += labels.size(0)
-
-    avg_loss = val_loss / len(val_loader)
-    avg_acc = (val_correct / val_samples) if val_samples > 0 else 0
     
-    return avg_loss, avg_acc
+    return val_loss / len(val_loader), val_correct / val_samples if val_samples > 0 else 0
 
-
-
-def run_training(cfg, device, model, ckpt_dir):
+# --- TRAINING MAIN ---
+def run_training(cfg: DictConfig, device, ckpt_dir: Path):
+    # 1. DATA
+    train_loader, _ = prepare_loader(cfg, 'train' if cfg.experiment.supervised else 'unlabeled')
+    val_loader, class_names = prepare_loader(cfg, 'val')
     
-    torch.set_float32_matmul_precision('high')
-
-    # --- 1. DATA PREPARATION ---
-    train_loader = prepare_loader(cfg, split='train' if cfg.experiment.supervised else 'unlabeled')
-    val_loader = prepare_loader(cfg, split='val')
-    gpu_aug, gpu_val_aug = get_gpu_transforms(cfg, device)
-
-    # Gradient accumulation setup (2048 for SupCon is much more stable)
-    if cfg.experiment.supervised:
-        target_bs = 2048 
-    else:
-        target_bs = 1024
-    accumulation_steps = max(1, target_bs // cfg.batch_size)
-    
-    # --- 2. PARAMETER FILTERING (WEIGHT DECAY) ---
-    decay_params = []
-    no_decay_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad: continue
-        if any(nd in name for nd in ["bias", "bn", "norm"]):
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
-
-    # Base optimizer components
-    param_groups = [
-        {'params': decay_params, 'weight_decay': cfg.experiment.weight_decay},
-        {'params': no_decay_params, 'weight_decay': 0.0}
-    ]
-
-    # --- 3. OPTIMIZER SELECTION ---
-    if cfg.experiment.supervised:
-        # For SupCon on small labeled sets (STL-10), pure SGD often outperforms LARS
-        optimizer = torch.optim.SGD(param_groups, lr=cfg.experiment.learning_rate, momentum=0.9)
-    else:
-        # LARS is still the best choice for large-scale Unlabeled training
-        base_optimizer = torch.optim.SGD(param_groups, lr=cfg.experiment.learning_rate, momentum=0.9)
-        optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
-
-    # --- 4. SCHEDULER ---
-    warmup_epochs = 10
-    total_epochs = cfg.experiment.epochs
-    
-    warmup_sched = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1e-4, total_iters=warmup_epochs
-    )
-    cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_epochs - warmup_epochs, eta_min=1e-4
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_epochs]
-    )
-
-    # --- 5. ONLINE LINEAR PROBING ---
-    feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
-    classifier = nn.Sequential(
-        nn.BatchNorm1d(feat_dim, affine=False),
-        nn.Linear(feat_dim, 10)
+    # 2. MODEL
+    model = NetflowSimCLR(
+        input_dim=cfg.data.input_dim,
+        hidden_dim=cfg.model.hidden_dim,
+        out_dim=cfg.model.out_dim,
+        num_classes=len(class_names) if cfg.experiment.supervised else None
     ).to(device)
-    cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9)
-
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
     
+    # 3. OPTIMIZER AdamW 
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.experiment.learning_rate,
+        weight_decay=cfg.experiment.weight_decay,
+        betas=(0.9, 0.99)
+    )
+    
+    # 4. SCHEDULER
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=cfg.experiment.learning_rate,
+        epochs=cfg.experiment.epochs,
+        steps_per_epoch=len(train_loader)
+    )
+    
+    # 5. CRITERION
     criterion = ContrastiveLoss(
-        temperature=cfg.experiment.temperature, 
+        temperature=cfg.experiment.temperature,
         supervised=cfg.experiment.supervised
     ).to(device)
-
-    # --- 6. MAIN TRAINING LOOP ---
-    for epoch in range(total_epochs):
+    
+    scaler = GradScaler('cuda')
+    
+    # 6. LINEAR PROBE CLASSIFIER
+    feat_dim = cfg.model.hidden_dim
+    classifier = nn.Sequential(
+        nn.BatchNorm1d(feat_dim),
+        nn.Linear(feat_dim, len(class_names))
+    ).to(device)
+    cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9)
+    
+    # TRAINING LOOP
+    for epoch in range(cfg.experiment.epochs):
         model.train()
         classifier.train()
-        total_loss, total_correct, total_samples = 0, 0, 0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{total_epochs}")
+        total_loss = 0
         
-        optimizer.zero_grad()
-
-        for i, (imgs, labels) in enumerate(pbar):
-            if isinstance(imgs, list): imgs = imgs[0]
-            imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True).long()
-
-            # Always use two views for ContrastiveLoss (even in supervised mode)
-            with torch.no_grad():
-                x_i, x_j = gpu_aug(imgs), gpu_aug(imgs)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg.experiment.epochs}")
+        
+        for x, labels in pbar:
+            x, labels = x.to(device, non_blocking=True), labels.to(device, non_blocking=True).long()
             
-            with torch.amp.autocast(device_type='cuda', dtype=dtype):
-                # Combined forward for efficiency
+            optimizer.zero_grad()
+            cls_optimizer.zero_grad()
+            
+            with autocast(device_type='cuda'):
+                
+                x_i, x_j = netflow_aug(x)
                 h_combined, z_combined = model(torch.cat([x_i, x_j], dim=0))
                 
-                # SupCon logic: z_combined (projector output) + labels
+                # Contrastive Loss
                 loss = criterion(z_combined, labels if cfg.experiment.supervised else None)
-                scaled_loss = loss / accumulation_steps
-            
-            scaler.scale(scaled_loss).backward()
-            
-            if (i + 1) % accumulation_steps == 0:
-                scaler.step(optimizer)
-                optimizer.zero_grad()
-
-            # Online Linear Probing (Training the classifier head)
-            if labels.min() >= 0: 
-                cls_optimizer.zero_grad()
-                with torch.amp.autocast(device_type='cuda', dtype=dtype):
-                    h_i = h_combined[:imgs.size(0)].detach() 
+                
+                # Linear probing loss
+                if labels.min() >= 0:
+                    h_i = h_combined[:x.size(0)]
                     logits = classifier(h_i)
                     cls_loss = F.cross_entropy(logits, labels)
-
-                scaler.scale(cls_loss).backward()
-                scaler.step(cls_optimizer)
-                
-                total_correct += (logits.argmax(1) == labels).sum().item()
-                total_samples += labels.size(0)
-
-            if (i + 1) % accumulation_steps == 0:
-                scaler.update()
-
-            total_loss += loss.item()
-            pbar.set_postfix({
-                'loss': f'{loss.item():.3f}', 
-                'acc': f'{(total_correct/total_samples if total_samples>0 else 0):.2%}'
-            })
+                    total_loss = loss + 0.1 * cls_loss  # weighted
+                else:
+                    total_loss = loss
+            
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.step(cls_optimizer)
+            scaler.update()
+            
+            scheduler.step()
+            pbar.set_postfix(loss=f'{total_loss.item():.3f}')
         
-        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg, gpu_val_aug)
-        
+        # Validation
+        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg)
         wandb.log({
-            "train/loss": total_loss / len(train_loader), 
-            "train/acc": total_correct / total_samples if total_samples > 0 else 0.0,
-            "val/loss": val_loss, 
-            "val/acc": val_acc, 
-            "epoch": epoch + 1,
-            "lr": optimizer.param_groups[0]['lr']
+            'epoch': epoch, 'train/loss': total_loss.item(),
+            'val/loss': val_loss, 'val/acc': val_acc,
+            'lr': scheduler.get_last_lr()[0]
         })
-        
-        scheduler.step()
-
+        print(f"Epoch {epoch}: Val Acc {val_acc:.2%}")
+    
+    # Save
     torch.save({
-        'model_state_dict': model.state_dict(),
-        'classifier_state_dict': classifier.state_dict(),
-        'epoch': total_epochs
-    }, ckpt_dir / "last_model.pth")
-    
-    return val_acc
+        'model': model.state_dict(),
+        'classifier': classifier.state_dict(),
+        'class_names': class_names
+    }, ckpt_dir / 'last_model.pth')
 
-
-def run_testing(cfg, device, model, ckpt_dir):
-    print("\n--- STARTING TESTING PHASE ---")
+# --- TESTING ---
+def run_testing(cfg: DictConfig, device, model, ckpt_dir: Path):
+    checkpoint = torch.load(ckpt_dir / 'last_model.pth', map_location=device)
+    model.load_state_dict(checkpoint['model'])
     
-    # 1. Load Checkpoint
-    checkpoint_path = ckpt_dir / "last_model.pth"
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    # 2. Setup Classifier (BatchNorm + Linear)
-    feat_dim = cfg.model_config.hidden_dim if hasattr(cfg.model_config, 'hidden_dim') else 512
-    classifier = nn.Sequential(
-        nn.BatchNorm1d(feat_dim, affine=False),
-        nn.Linear(feat_dim, cfg.data.num_classes)
-    ).to(device)
-    classifier.load_state_dict(checkpoint['classifier_state_dict'])
+    test_loader, class_names = prepare_loader(cfg, 'test')
     
     model.eval()
-    classifier.eval()
-    
-    # 3. Data Loading
-    test_loader = prepare_loader(cfg, split='test')
-    _, gpu_test_aug = get_gpu_transforms(cfg, device)
-    
-    autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    
     correct, total = 0, 0
-    all_preds, all_labels = [], []
-
-    # 4. Evaluation Loop
     with torch.no_grad():
-        for imgs, labels in tqdm(test_loader, desc="Evaluating Test Set"):
-            if isinstance(imgs, list): imgs = imgs[0]
-            imgs = imgs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True).long() 
-
-            imgs = gpu_test_aug(imgs)
-
-            with torch.amp.autocast(device_type='cuda', dtype=autocast_dtype):
-                h = model(imgs, return_features=True)
-                logits = classifier(h)
-                
+        for x, labels in tqdm(test_loader, desc='Test'):
+            x, labels = x.to(device), labels.to(device)
+            x_i, x_j = netflow_aug(x)
+            h = model.backbone(torch.cat([x_i, x_j], dim=0))[:x.size(0)]
+            logits = model.classifier(h)
             preds = logits.argmax(1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
-            
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
     
-    # 5. Accuracy Calculation
-    final_acc = 100 * correct / total
-    print(f"\n[TEST RESULT] Accuracy: {final_acc:.2f}%")
+    acc = 100 * correct / total
+    print(f"TEST ACC: {acc:.2f}%")
+    wandb.log({'test/acc': acc})
+    return acc
 
-    # --- 6. EXTERNAL t-SNE PLOT CALL ---
-    # We call the function from plot.py passing the checkpoint path
-    print("Generating t-SNE plot using plot.py...")
-    experiment_label = f"{cfg.experiment.mode}_acc_{final_acc:.1f}"
-    
-    # generate_tsne_plot saves the image and returns the path
-    tsne_image_path = generate_tsne_plot(
-        ckpt_path=str(checkpoint_path), 
-        base_model=cfg.model.backbone,
-        experiment_name=experiment_label
-    )
-
-    # 7. Logging to WandB
-    class_names = test_loader.dataset.classes if hasattr(test_loader.dataset, 'classes') else None
-    metrics = {
-        "test/acc": final_acc / 100,
-        "test/tsne_image": wandb.Image(tsne_image_path),
-        "test/confusion_matrix": wandb.plot.confusion_matrix(
-            probs=None,
-            y_true=all_labels,
-            preds=all_preds,
-            class_names=class_names
-        )
-    }
-    wandb.log(metrics)
-    
-    return final_acc
-
-
-
-
-# --- MAIN EXECUTION ---
 @hydra.main(version_base="1.2", config_path="config", config_name="configuratore")
 def main(cfg: DictConfig):
     root_dir = Path(hydra.utils.get_original_cwd())
-    ckpt_dir = root_dir / "checkpoints" / cfg.experiment.mode
+    ckpt_dir = root_dir / f"checkpoints/{cfg.experiment.mode}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    # Device auto-detection
-    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    
+    device = torch.device(cfg.device if torch.cuda.is_available() else 'cpu')
     torch.manual_seed(cfg.seed)
-
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
-
-    wandb.init(
-        project=cfg.logger.project, 
-        group=cfg.experiment.mode, 
-        config=OmegaConf.to_container(cfg, resolve=True)
-    )
-
-    model = SimCLR(base_model=cfg.model.backbone, out_dim=cfg.model.out_dim).to(device)
-
-    stage = cfg.get("stage", "all")
     
-    if stage in ["all", "training"]:
+    wandb.init(project=cfg.logger.project, config=OmegaConf.to_container(cfg))
+    
+    model = NetflowSimCLR(
+        input_dim=cfg.data.input_dim,  
+        hidden_dim=cfg.model.hidden_dim,
+        out_dim=cfg.model.out_dim
+    ).to(device)
+    
+    stage = cfg.get('stage', 'all')
+    if stage in ['all', 'training']:
         run_training(cfg, device, model, ckpt_dir)
-    
-    if stage in ["all", "testing"]:
+    if stage in ['all', 'testing']:
         run_testing(cfg, device, model, ckpt_dir)
-
+    
     wandb.finish()
 
 if __name__ == "__main__":
