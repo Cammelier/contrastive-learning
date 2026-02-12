@@ -137,7 +137,7 @@ def preprocess_df(
 def main() -> None:
     """Main entry point for data preparation."""
     cfg = load_config(
-        config_path=Path(__file__).parent / "configs",
+        config_path=Path(__file__).parent / "config",
         config_name="config",
         overrides=sys.argv[1:],
     )
