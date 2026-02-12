@@ -5,7 +5,6 @@ defaults:
   - optimizer: lars              
   - scheduler: cosine_warmup
   - experiment: self_supervised
-  - path: default
   - _self_
 
 seed: 42
