@@ -43,26 +43,24 @@ def prepare_loader(cfg, split='train'):
     dataset = NetFlowDataset(cfg, split)
     is_train = (split == 'train')
     
-    batch_size = cfg.get('batch_size', cfg.get('experiment', {}).get('batch_size', 32))
+    # Prendi il batch_size corretto in base alla fase
+    if is_train and 'experiment' in cfg:
+        batch_size = cfg.experiment.get('batch_size', 256)
+    else:
+        batch_size = cfg.get('batch_size', 256)
     
-    # --- CALCOLO AUTOMATICO PESI ---
     labels = dataset.labels
     unique_classes, class_sample_count = np.unique(labels, return_counts=True)
     
-    # Pesi per la LOSS (Inversamente proporzionali alla frequenza)
-    # Servono per run_linear_probe e run_fine_tuning
+    # Calcolo pesi per la CrossEntropyLoss (Finetuning)
     loss_weights = 1. / (class_sample_count.astype(np.float32) + 1e-6)
-    loss_weights = loss_weights / loss_weights.sum() * len(unique_classes)
     loss_weights_tensor = torch.from_numpy(loss_weights).float()
 
     sampler = None
     if is_train:
-        # Pesi per il SAMPLER (Smoothing con radice quadrata)
-        # Aiuta a bilanciare la composizione dei batch
-        sampler_weights = 1. / np.sqrt(class_sample_count) 
-        samples_weight = np.array([sampler_weights[t] for t in labels])
-        samples_weight = torch.from_numpy(samples_weight).double()
-        
+        # Pesi per il WeightedRandomSampler
+        sampler_weights = 1. / class_sample_count # Più aggressivo per SupCon
+        samples_weight = torch.from_numpy(sampler_weights[labels]).double()
         sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
         shuffle = False 
     else:
@@ -73,9 +71,11 @@ def prepare_loader(cfg, split='train'):
         batch_size=batch_size,
         shuffle=shuffle,
         sampler=sampler, 
-        num_workers=cfg.get('num_workers', 4),
+        num_workers=cfg.get('system', {}).get('num_workers', 4),
         pin_memory=True,
         drop_last=is_train 
     )
     
-    return loader, dataset.class_names, loss_weights_tensor
+    # Ritorna anche il dataset per il pre-training
+    return loader, dataset, loss_weights_tensor
+
