@@ -10,7 +10,8 @@ from pathlib import Path
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 from sklearn.metrics import f1_score, classification_report, balanced_accuracy_score
-from src.datasets import prepare_loader 
+from src.datasets import prepare_loader
+from src.common.plot import plot_enhanced_confusion_matrix 
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -207,7 +208,9 @@ def run_testing(cfg, device, model, ckpt_dir: Path, mode='linear_probe'):
             f, _ = model(x.to(device))
             all_preds.extend(classifier(f).argmax(1).cpu().numpy())
             all_labels.extend(labels.numpy())
-            
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+    plot_enhanced_confusion_matrix(all_labels, all_preds, class_names, mode)
     print(f"\n📊 REPORT {mode.upper()}:\n", classification_report(all_labels, all_preds, target_names=class_names, digits=4))
     wandb.log({f"test_{mode}_f1": f1_score(all_labels, all_preds, average='macro')})
 
