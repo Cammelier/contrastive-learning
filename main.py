@@ -36,8 +36,9 @@ def netflow_aug(x, noise_strength=0.02, drop_prob=0.1):
     return x_i, x_j
 
 # --- VALIDATION (NetFlow) ---
-def run_validation(model, classifier, val_loader, device, cfg):
-    engine.model.eval()
+def run_validation(model, classifier, val_loader, criterion, device, cfg):
+    model.eval()
+    classifier.eval()
     val_loss, val_correct, val_samples = 0, 0, 0
     
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
@@ -54,8 +55,8 @@ def run_validation(model, classifier, val_loader, device, cfg):
                 
                 # Linear probing acc
                 if labels.min() >= 0:
-                    h_i = engine.model.backbone(torch.cat([x_i, x_j], dim=0))[:x.size(0)]
-                    logits = engine.classifier(h_i)
+                    h_i = model.backbone(torch.cat([x_i, x_j], dim=0))[:x.size(0)]
+                    logits = classifier(h_i)
                     preds = logits.argmax(1)
                     val_correct += (preds == labels).sum().item()
                     val_samples += labels.size(0)
