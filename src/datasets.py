@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler # <--- Aggiunto Sampler
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,39 +7,29 @@ from src.data.io import load_df
 
 class NetFlowDataset(Dataset):
     def __init__(self, cfg, split='train'):
-        # 1. Dynamic path
         base_path = Path(cfg.path.processed_data)
         file_path = base_path / f"{cfg.data.file_name}_{split}.{cfg.data.extension}"
         
         if not file_path.exists():
             raise FileNotFoundError(f"File non trovato: {file_path}. Esegui prima lo script di preprocessing!")
 
-        # 2. Load file 
         df = load_df(str(file_path))
         
-        # 3. Select cols
-       
         num_cols = list(cfg.data.num_cols)
         cat_cols = list(cfg.data.cat_cols)
         
-   
         label_col = f"multi_{cfg.data.label_col}" 
-        if label_col not in df.columns:
-            label_col = f"bin_{cfg.data.label_col}" 
-            
-            
         if label_col not in df.columns:
             label_col = cfg.data.label_col 
             
-
-        # 4. Estrazione Tensor 
         self.features = df[num_cols + cat_cols].values.astype(np.float32)
         self.labels = df[label_col].values.astype(np.int64)
         
-        
+        self.num_classes = len(np.unique(self.labels))
         self.class_names = [str(c) for c in np.unique(self.labels)]
         
-        print(f"[{split.upper()}] Caricati {len(df)} campioni. Feature: {self.features.shape[1]}")
+        print(f"[{split.upper()}] Caricati {len(df)} campioni.")
+        print(f"[{split.upper()}] Feature: {self.features.shape[1]} | Target: {label_col} | Classi: {self.num_classes}")
 
     def __len__(self): 
         return len(self.features)
@@ -50,18 +40,33 @@ class NetFlowDataset(Dataset):
         return x, y
 
 def prepare_loader(cfg, split='train'):
-    """
-    Inizializza il dataset e ritorna il DataLoader.
-    """
     dataset = NetFlowDataset(cfg, split)
-    
-   
     is_train = (split == 'train')
     
+    batch_size = cfg.get('batch_size', cfg.get('experiment', {}).get('batch_size', 32))
+    
+    sampler = None
+    # BILANCIAMENTO: Applichiamo il campionamento pesato solo in fase di training/probe
+    if is_train:
+        labels = dataset.labels
+        class_sample_count = np.array([len(np.where(labels == t)[0]) for t in np.unique(labels)])
+        
+        # Il peso è l'inverso della frequenza (più rara è la classe, più alto è il peso)
+        weight = 1. / class_sample_count
+        samples_weight = np.array([weight[t] for t in labels])
+        samples_weight = torch.from_numpy(samples_weight).double()
+        
+        sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
+        # Nota: Quando si usa il sampler, 'shuffle' deve essere False
+        shuffle = False 
+    else:
+        shuffle = False
+
     loader = DataLoader(
         dataset, 
-        batch_size=cfg.get('batch_size', cfg.get('experiment', {}).get('batch_size', 32)),
-        shuffle=is_train,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        sampler=sampler, 
         num_workers=cfg.get('num_workers', 4),
         pin_memory=True,
         drop_last=is_train 

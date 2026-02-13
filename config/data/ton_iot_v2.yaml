@@ -1,73 +1,72 @@
+# ============================================================================
+# TON-IOT-v2 DATA CONFIGURATION
+# Telemetry of Networks IoT Dataset
+# ============================================================================
+
 name: ton_iot_v2
-
 file_name: ton_iot_v2
-
 extension: parquet
 
-label_col: Attack
-
-num_cols:
-- IN_BYTES
-- IN_PKTS
-- OUT_BYTES
-- OUT_PKTS
-- FLOW_DURATION_MILLISECONDS
-- DURATION_IN
-- DURATION_OUT
-- MIN_TTL
-- MAX_TTL
-- LONGEST_FLOW_PKT
-- SHORTEST_FLOW_PKT
-- MIN_IP_PKT_LEN
-- MAX_IP_PKT_LEN
-- SRC_TO_DST_SECOND_BYTES
-- DST_TO_SRC_SECOND_BYTES
-- RETRANSMITTED_IN_BYTES
-- RETRANSMITTED_IN_PKTS
-- RETRANSMITTED_OUT_BYTES
-- RETRANSMITTED_OUT_PKTS
-- SRC_TO_DST_AVG_THROUGHPUT
-- DST_TO_SRC_AVG_THROUGHPUT
-- NUM_PKTS_UP_TO_128_BYTES
-- NUM_PKTS_128_TO_256_BYTES
-- NUM_PKTS_256_TO_512_BYTES
-- NUM_PKTS_512_TO_1024_BYTES
-- NUM_PKTS_1024_TO_1514_BYTES
-- TCP_WIN_MAX_IN
-- TCP_WIN_MAX_OUT
-- DNS_TTL_ANSWER
-
-cat_cols:
-- L4_SRC_PORT
-- L4_DST_PORT
-- PROTOCOL
-- L7_PROTO
-- TCP_FLAGS
-- CLIENT_TCP_FLAGS
-- SERVER_TCP_FLAGS
-- ICMP_TYPE
-- ICMP_IPV4_TYPE
-- DNS_QUERY_ID
-- DNS_QUERY_TYPE
-
-num_numerical: 29
-
-num_categorical: 11
-
-benign_tag: Benign
-
-train_frac: 0.8
-
-val_frac: 0.1
-
-test_frac: 0.1
-
-filter_query: null # ${data.label_col} != '${data.benign_tag}'
-
-min_cat_count: 3000
-
-top_n_categories: 32
-
+# Input dimensions
 input_dim: 40
 
-num_workers: 2
+# Label configuration
+label_col: Attack  
+benign_tag: Normal
+
+num_cols:
+  - IN_BYTES
+  - IN_PKTS
+  - OUT_BYTES
+  - OUT_PKTS
+  - FLOW_DURATION_MILLISECONDS
+  - DURATION_IN
+  - DURATION_OUT
+  - MIN_TTL
+  - MAX_TTL
+  - LONGEST_FLOW_PKT
+  - SHORTEST_FLOW_PKT
+  - MIN_IP_PKT_LEN
+  - MAX_IP_PKT_LEN
+  - SRC_TO_DST_SECOND_BYTES
+  - DST_TO_SRC_SECOND_BYTES
+  - RETRANSMITTED_IN_BYTES
+  - RETRANSMITTED_IN_PKTS
+  - RETRANSMITTED_OUT_BYTES
+  - RETRANSMITTED_OUT_PKTS
+  - SRC_TO_DST_AVG_THROUGHPUT
+  - DST_TO_SRC_AVG_THROUGHPUT
+  - NUM_PKTS_UP_TO_128_BYTES
+  - NUM_PKTS_128_TO_256_BYTES
+  - NUM_PKTS_256_TO_512_BYTES
+  - NUM_PKTS_512_TO_1024_BYTES
+  - NUM_PKTS_1024_TO_1514_BYTES
+  - TCP_WIN_MAX_IN
+  - TCP_WIN_MAX_OUT
+  - DNS_TTL_ANSWER
+
+cat_cols:
+  - L4_SRC_PORT
+  - L4_DST_PORT
+  - PROTOCOL
+  - L7_PROTO
+  - TCP_FLAGS
+  - CLIENT_TCP_FLAGS
+  - SERVER_TCP_FLAGS
+  - ICMP_TYPE
+  - ICMP_IPV4_TYPE
+  - DNS_QUERY_ID
+  - DNS_QUERY_TYPE
+
+num_numerical: 35
+num_categorical: 8
+
+# Data splitting
+train_frac: 0.8
+val_frac: 0.1
+test_frac: 0.1
+
+# Filtering and preprocessing
+filter_query: null
+min_cat_count: 2000
+top_n_categories: 24
