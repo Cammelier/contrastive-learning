@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class ContrastiveModel(nn.Module):
+class SimCLR(nn.Module):
     def __init__(self, input_dim: int, out_dim: int = 128, hidden_dim: int = 512, num_classes: int = None):
         super().__init__()
         
