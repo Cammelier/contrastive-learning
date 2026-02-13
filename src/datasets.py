@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler # <--- Aggiunto Sampler
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -11,7 +11,7 @@ class NetFlowDataset(Dataset):
         file_path = base_path / f"{cfg.data.file_name}_{split}.{cfg.data.extension}"
         
         if not file_path.exists():
-            raise FileNotFoundError(f"File non trovato: {file_path}. Esegui prima lo script di preprocessing!")
+            raise FileNotFoundError(f"File non trovato: {file_path}")
 
         df = load_df(str(file_path))
         
@@ -45,19 +45,25 @@ def prepare_loader(cfg, split='train'):
     
     batch_size = cfg.get('batch_size', cfg.get('experiment', {}).get('batch_size', 32))
     
+    # --- CALCOLO AUTOMATICO PESI ---
+    labels = dataset.labels
+    unique_classes, class_sample_count = np.unique(labels, return_counts=True)
+    
+    # Pesi per la LOSS (Inversamente proporzionali alla frequenza)
+    # Servono per run_linear_probe e run_fine_tuning
+    loss_weights = 1. / (class_sample_count.astype(np.float32) + 1e-6)
+    loss_weights = loss_weights / loss_weights.sum() * len(unique_classes)
+    loss_weights_tensor = torch.from_numpy(loss_weights).float()
+
     sampler = None
-    # BILANCIAMENTO: Applichiamo il campionamento pesato solo in fase di training/probe
     if is_train:
-        labels = dataset.labels
-        class_sample_count = np.array([len(np.where(labels == t)[0]) for t in np.unique(labels)])
-        
-        # Il peso è l'inverso della frequenza (più rara è la classe, più alto è il peso)
-        weight = 1. / class_sample_count
-        samples_weight = np.array([weight[t] for t in labels])
+        # Pesi per il SAMPLER (Smoothing con radice quadrata)
+        # Aiuta a bilanciare la composizione dei batch
+        sampler_weights = 1. / np.sqrt(class_sample_count) 
+        samples_weight = np.array([sampler_weights[t] for t in labels])
         samples_weight = torch.from_numpy(samples_weight).double()
         
         sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
-        # Nota: Quando si usa il sampler, 'shuffle' deve essere False
         shuffle = False 
     else:
         shuffle = False
@@ -72,4 +78,4 @@ def prepare_loader(cfg, split='train'):
         drop_last=is_train 
     )
     
-    return loader, dataset.class_names
+    return loader, dataset.class_names, loss_weights_tensor

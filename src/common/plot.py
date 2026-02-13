@@ -3,11 +3,12 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import wandb
 from sklearn.manifold import TSNE
 from pathlib import Path
 from tqdm import tqdm
+from sklearn.metrics import confusion_matrix
 
-# 
 from src.models import SimCLR
 from src.datasets import prepare_loader  
 
@@ -73,6 +74,24 @@ def generate_tsne_plot(ckpt_path, input_dim=78, experiment_name="", cfg=None):
     print(f"✓ Saved: {save_path}")
     return str(save_path)
 
+def plot_enhanced_confusion_matrix(all_labels, all_preds, class_names, mode):
+    cm = confusion_matrix(all_labels, all_preds)
+    # Normalizziamo per riga per vedere la precisione percentuale di ogni classe
+    cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.title(f"Normalized Confusion Matrix - {mode.upper()}")
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    
+    # Salva il grafico per la tesi
+    plt.savefig(f"confusion_matrix_{mode}.png", dpi=300)
+    # Log su WandB
+    wandb.log({f"test/{mode}_cm_image": wandb.Image(plt)})
+    plt.close()
+
 if __name__ == "__main__":
     # Esempio per cic_2018_v2
     from omegaconf import OmegaConf
@@ -91,3 +110,4 @@ if __name__ == "__main__":
         experiment_name="CIC-2018 Self-Supervised",
         cfg=cfg
     )
+
