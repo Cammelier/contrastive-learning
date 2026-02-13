@@ -15,6 +15,7 @@ run_id: 0
 stage: all
 batch_size: 512
 epochs: 100
+num_workers: 4
 logger:
   wandb:
     project: contrastive_learning
