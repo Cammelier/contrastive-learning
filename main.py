@@ -151,7 +151,7 @@ def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
             pbar.set_postfix(loss=f'{total_loss.item():.3f}')
         
         # Validation
-        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg)
+        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion)
         wandb.log({
             'epoch': epoch, 'train/loss': total_loss.item(),
             'val/loss': val_loss, 'val/acc': val_acc,
