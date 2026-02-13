@@ -36,7 +36,7 @@ def netflow_aug(x, noise_strength=0.02, drop_prob=0.1):
     return x_i, x_j
 
 # --- VALIDATION (NetFlow) ---
-def run_validation(model, classifier, val_loader, criterion, device, cfg):
+def run_validation(model, classifier, val_loader, criterion, device, cfg, class_weights=None):
     model.eval()
     classifier.eval()
     val_loss, val_correct, val_samples = 0, 0, 0
@@ -48,63 +48,53 @@ def run_validation(model, classifier, val_loader, criterion, device, cfg):
             x, labels = x.to(device), labels.to(device).long()
             
             with autocast(device_type='cuda', dtype=dtype):
-                x_i, x_j = netflow_aug(x)
-                _, z_combined = engine.model(torch.cat([x_i, x_j], dim=0))
-                loss = engine.criterion(z_combined, labels if cfg.experiment.supervised else None)
+                # Feature extraction on clean data
+                h, _ = model(x)
+                logits = classifier(h)
+                
+                # Cross Entropy with weights for balanced evaluation
+                loss = F.cross_entropy(logits, labels, weight=class_weights)
                 val_loss += loss.item()
                 
-                # Linear probing acc
-                if labels.min() >= 0:
-                    h_i = model.backbone(torch.cat([x_i, x_j], dim=0))[:x.size(0)]
-                    logits = classifier(h_i)
-                    preds = logits.argmax(1)
-                    val_correct += (preds == labels).sum().item()
-                    val_samples += labels.size(0)
+                # Accuracy calculation
+                preds = logits.argmax(1)
+                val_correct += (preds == labels).sum().item()
+                val_samples += labels.size(0)
     
     return val_loss / len(val_loader), val_correct / val_samples if val_samples > 0 else 0
 
+
+
 # --- TRAINING MAIN ---
-def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
+def run_training(cfg: DictConfig, device, model, ckpt_dir: Path):
     # 1. DATA
     train_loader, _ = prepare_loader(cfg, 'train')
     val_loader, class_names = prepare_loader(cfg, 'val')
     
-    num_classes = len(np.unique(train_loader.dataset.labels))
-    print(f"Dataset detected: {num_classes} classes.")
+    # --- CLASS WEIGHTS CALCULATION ---
+    labels_all = train_loader.dataset.labels
+    class_sample_count = np.bincount(labels_all)
+    # Inverse frequency weighting
+    weights = 1. / class_sample_count
+    # Normalizing weights (sum equals number of classes)
+    weights = weights / weights.sum() * len(class_sample_count)
+    class_weights = torch.FloatTensor(weights).to(device)
+    print(f"Class weights applied to Loss: {class_weights.cpu().numpy()}")
+    # ---------------------------------
 
-    # 2. MODEL
-    model = SimCLR(
-        input_dim=cfg.data.input_dim,
-        hidden_dim=cfg.model.hidden_dim,
-        out_dim=cfg.model.out_dim,
-        num_classes=num_classes if cfg.experiment.supervised else None
-    ).to(device)
+    num_classes = len(class_sample_count)
     
-    # 3. OPTIMIZER AdamW 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg.experiment.learning_rate,
-        weight_decay=cfg.experiment.weight_decay,
-        betas=(0.9, 0.99)
-    )
-    
-    # 4. SCHEDULER
+    # 3. OPTIMIZER & SCHEDULER
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.experiment.learning_rate)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=cfg.experiment.learning_rate,
-        epochs=cfg.experiment.epochs,
-        steps_per_epoch=len(train_loader)
+        optimizer, max_lr=cfg.experiment.learning_rate, 
+        epochs=cfg.experiment.epochs, steps_per_epoch=len(train_loader)
     )
     
-    # 5. CRITERION
-    criterion = ContrastiveLoss(
-        temperature=cfg.experiment.temperature,
-        supervised=cfg.experiment.supervised
-    ).to(device)
-    
+    # 5. CRITERION & LINEAR PROBE
+    criterion = ContrastiveLoss(temperature=cfg.experiment.temperature).to(device)
     scaler = GradScaler('cuda')
     
-    # 6. LINEAR PROBE CLASSIFIER
     feat_dim = cfg.model.hidden_dim
     classifier = nn.Sequential(
         nn.BatchNorm1d(feat_dim),
@@ -112,84 +102,86 @@ def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
     ).to(device)
     cls_optimizer = torch.optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9)
     
-    # TRAINING LOOP
     for epoch in range(cfg.experiment.epochs):
         model.train()
         classifier.train()
-        total_loss = 0
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg.experiment.epochs}")
-        
         for x, labels in pbar:
             x, labels = x.to(device, non_blocking=True), labels.to(device, non_blocking=True).long()
-            
-            optimizer.zero_grad()
-            cls_optimizer.zero_grad()
+            optimizer.zero_grad(); cls_optimizer.zero_grad()
             
             with autocast(device_type='cuda'):
-                
                 x_i, x_j = netflow_aug(x)
                 h_combined, z_combined = model(torch.cat([x_i, x_j], dim=0))
                 
-                # Contrastive Loss
-                loss = criterion(z_combined, labels if cfg.experiment.supervised else None)
+                # 1. Contrastive Loss
+                loss_cont = criterion(z_combined)
                 
-                # Linear probing loss
-                if labels.min() >= 0:
-                    h_i = h_combined[:x.size(0)]
-                    logits = classifier(h_i)
-                    cls_loss = F.cross_entropy(logits, labels)
-                    total_loss = loss + 0.1 * cls_loss  # weighted
-                else:
-                    total_loss = loss
+                # 2. Weighted Linear Probing Loss
+                h_i = h_combined[:x.size(0)]
+                logits = classifier(h_i)
+                loss_cls = F.cross_entropy(logits, labels, weight=class_weights)
+                
+                total_loss = loss_cont + 0.5 * loss_cls
             
             scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
-            scaler.step(cls_optimizer)
-            scaler.update()
-            
-            scheduler.step()
+            scaler.step(optimizer); scaler.step(cls_optimizer)
+            scaler.update(); scheduler.step()
             pbar.set_postfix(loss=f'{total_loss.item():.3f}')
         
-        # Validation
-        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion,device,cfg)
-        wandb.log({
-            'epoch': epoch, 'train/loss': total_loss.item(),
-            'val/loss': val_loss, 'val/acc': val_acc,
-            'lr': scheduler.get_last_lr()[0]
-        })
+        # Validation with weights
+        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion, device, cfg, class_weights)
+        wandb.log({'epoch': epoch, 'val/acc': val_acc, 'val/loss': val_loss})
         print(f"Epoch {epoch}: Val Acc {val_acc:.2%}")
     
-    # Save
     torch.save({
         'model': model.state_dict(),
         'classifier': classifier.state_dict(),
-        'class_names': class_names
+        'class_names': class_names,
+        'class_weights': class_weights.cpu()
     }, ckpt_dir / 'last_model.pth')
 
-# --- TESTING ---
+
+#---  TESTING  ---
 def run_testing(cfg: DictConfig, device, model, ckpt_dir: Path):
     checkpoint = torch.load(ckpt_dir / 'last_model.pth', map_location=device)
     model.load_state_dict(checkpoint['model'])
     
-    test_loader, class_names = prepare_loader(cfg, 'test')
+    class_names = checkpoint.get('class_names', ['Benign', 'Attack'])
+    num_classes = len(class_names)
     
-    model.eval()
-    correct, total = 0, 0
+    classifier = nn.Sequential(
+        nn.BatchNorm1d(cfg.model.hidden_dim),
+        nn.Linear(cfg.model.hidden_dim, num_classes)
+    ).to(device)
+    classifier.load_state_dict(checkpoint['classifier'])
+    
+    test_loader, _ = prepare_loader(cfg, 'test')
+    model.eval(); classifier.eval()
+    
+    all_preds, all_labels = [], []
     with torch.no_grad():
-        for x, labels in tqdm(test_loader, desc='Test'):
-            x, labels = x.to(device), labels.to(device)
-            x_i, x_j = netflow_aug(x)
-            h = model.backbone(torch.cat([x_i, x_j], dim=0))[:x.size(0)]
-            logits = model.classifier(h)
-            preds = logits.argmax(1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+        for x, labels in tqdm(test_loader, desc='Testing'):
+            x, labels = x.to(device), labels.to(device).long()
+            h, _ = model(x)
+            preds = classifier(h).argmax(1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
-    acc = 100 * correct / total
-    print(f"TEST ACC: {acc:.2f}%")
-    wandb.log({'test/acc': acc})
+    acc = 100 * np.mean(np.array(all_preds) == np.array(all_labels))
+    print(f"\n[TEST RESULT] Accuracy: {acc:.2f}%")
+    
+    # LOG CONFUSION MATRIX TO WANDB
+    wandb.log({
+        "test/acc": acc,
+        "test/confusion_matrix": wandb.plot.confusion_matrix(
+            probs=None, y_true=all_labels, preds=all_preds, class_names=class_names
+        )
+    })
     return acc
+
+
 
 setup_logger() 
 

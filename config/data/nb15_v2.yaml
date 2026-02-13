@@ -38,7 +38,6 @@ num_cols:
 - DNS_TTL_ANSWER
 
 cat_cols:
-- L4_SRC_PORT
 - L4_DST_PORT
 - PROTOCOL
 - L7_PROTO
@@ -47,8 +46,7 @@ cat_cols:
 - SERVER_TCP_FLAGS
 - ICMP_TYPE
 - ICMP_IPV4_TYPE
-- DNS_QUERY_ID
-- DNS_QUERY_TYPE
+
 
 num_numerical: 29
 
@@ -68,6 +66,6 @@ min_cat_count: 3000
 
 top_n_categories: 32
 
-input_dim: 40 
+input_dim: 37
 
 num_workers: 2
