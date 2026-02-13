@@ -36,7 +36,7 @@ def netflow_aug(x, noise_strength=0.02, drop_prob=0.1):
     return x_i, x_j
 
 # --- VALIDATION (NetFlow) ---
-def run_validation(engine, val_loader, device, cfg):
+def run_validation(model, classifier, val_loader, device, cfg):
     engine.model.eval()
     val_loss, val_correct, val_samples = 0, 0, 0
     
@@ -151,7 +151,7 @@ def run_training(cfg: DictConfig, device, model,ckpt_dir: Path):
             pbar.set_postfix(loss=f'{total_loss.item():.3f}')
         
         # Validation
-        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion)
+        val_loss, val_acc = run_validation(model, classifier, val_loader, criterion,device,cfg)
         wandb.log({
             'epoch': epoch, 'train/loss': total_loss.item(),
             'val/loss': val_loss, 'val/acc': val_acc,
