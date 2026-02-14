@@ -1,8 +1,8 @@
 mode: "supervised"
 supervised: true
-temperature: 0.15
-learning_rate: 5e-4
+temperature: 0.3
+learning_rate: 1e-3
 weight_decay: 1e-2
 epochs: 100
-batch_size: 512
+batch_size: 256
 num_workers: 4

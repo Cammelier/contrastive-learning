@@ -24,55 +24,69 @@ def extract_features(model, loader, device):
             labels.append(target.numpy())
     return np.concatenate(features), np.concatenate(labels)
 
-def generate_tsne_plot(ckpt_path, input_dim=78, experiment_name="", cfg=None):
-    """t-SNE for NetFlow contrastive representations."""
+def generate_tsne_plot(ckpt_path, input_dim=40, experiment_name="SupCon_NB15", cfg=None):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.manifold import TSNE
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-
-    model = SimCLR(
-        input_dim=input_dim,  
-        hidden_dim=512, 
-        out_dim=128, 
-        num_classes=None  
-    ).to(device)
+    # 1. Inizializzazione Modello coerente con il tuo script
+    model = SimCLR(input_dim=input_dim, hidden_dim=512).to(device)
     
-    # Load checkpoint
+    # 2. Caricamento Checkpoint (Corretto per PyTorch 2.6 e chiavi attuali)
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    print(f"✓ Loaded NetFlow checkpoint: {ckpt_path}")
+    # Usiamo la chiave 'model' come salvato nel tuo run_pretraining
+    model.load_state_dict(checkpoint['model'], strict=False)
+    print(f"✓ Checkpoint caricato correttamente")
 
+    # 3. Loader con sottocampionamento per t-SNE (Max 5000 campioni per leggibilità)
+    test_loader, dataset, _ = prepare_loader(cfg, split='test')
+    class_names = dataset.class_names
     
-    test_loader, class_names = prepare_loader(cfg, split='test')
-    print(f"Classes: {class_names}")
+    # Estraiamo un numero limitato di campioni per evitare crash di memoria
+    print("⏳ Estrazione feature in corso...")
+    X_full, y_full = extract_features(model, test_loader, device)
+    
+    indices = np.random.choice(len(X_full), min(5000, len(X_full)), replace=False)
+    X, y = X_full[indices], y_full[indices]
 
-    # Feature extraction
-    X, y = extract_features(model, test_loader, device)
-
-    # t-SNE
-    tsne = TSNE(n_components=2, perplexity=min(30, len(X)//10), 
-                random_state=42, init='pca', learning_rate='auto')
+    # 4. t-SNE SOTA Parameters
+    print(f"🚀 Calcolo t-SNE su {len(X)} campioni...")
+    tsne = TSNE(
+        n_components=2, 
+        perplexity=40, # Alzato per cluster più definiti
+        random_state=42, 
+        init='pca', 
+        learning_rate='auto',
+        n_iter=1000
+    )
     X_embedded = tsne.fit_transform(X)
 
-    # Plot
-    plt.figure(figsize=(12, 10))
-    sns.scatterplot(
+    # 5. Plotting con stile professionale
+    plt.figure(figsize=(14, 10))
+    sns.set_style("whitegrid")
+    
+    # Creiamo una palette distinta per le 9 classi
+    palette = sns.color_palette("bright", len(class_names))
+    
+    scatter = sns.scatterplot(
         x=X_embedded[:, 0], y=X_embedded[:, 1],
         hue=[class_names[i] for i in y],
-        palette=sns.color_palette("hls", len(class_names)),
-        legend="full", alpha=0.6, s=30
+        palette=palette,
+        legend="full", alpha=0.7, s=40, edgecolor='w', linewidth=0.5
     )
     
-    plt.title(f"t-SNE NetFlow: {experiment_name}", fontsize=15)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
+    plt.title(f"Visualizzazione Spazio Latente: {experiment_name}\n(UNSW-NB15 Multiclass)", fontsize=16)
+    plt.legend(title="Classi di Attacco", bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.xlabel("t-SNE Dimension 1")
+    plt.ylabel("t-SNE Dimension 2")
     
-    save_name = experiment_name.lower().replace(' ', '_')
-    save_path = Path(f"tsne_netflow_{save_name}.png")
+    save_path = Path(f"tsne_{experiment_name.lower()}.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"✓ Saved: {save_path}")
-    return str(save_path)
+    print(f"✅ Plot salvato in: {save_path}")
+    plt.show()
+
 
 def plot_enhanced_confusion_matrix(all_labels, all_preds, class_names, mode):
     cm = confusion_matrix(all_labels, all_preds)

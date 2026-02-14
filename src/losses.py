@@ -60,3 +60,19 @@ class ContrastiveLoss(nn.Module):
             loss = -mean_log_prob_pos.mean() 
 
         return loss
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha # Pesi delle classi
+        self.gamma = gamma # Quanto punire gli esempi difficili
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
+        if self.reduction == 'mean': return focal_loss.mean()
+        return focal_loss.sum()

@@ -20,6 +20,7 @@ from src.common.plot import plot_enhanced_confusion_matrix
 from src.losses import ContrastiveLoss
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.cuda.amp import GradScaler, autocast 
+from src.models import SimCLR
 
 
 import warnings
@@ -72,7 +73,7 @@ def run_contrastive_pretraining(cfg, device, model, ckpt_dir):
     # Regolazione automatica della temperatura se bloccata
     temp = cfg.experiment.temperature
     if supervised and temp < 0.1:
-        temp = 0.15 # Temperatura SOTA per SupCon su dati sbilanciati
+        temp = 0.15 
     
     print(f"\n🚀 Starting {mode_name} Pretraining | Temp: {temp} | Balanced Sampling: ON")
     
@@ -82,12 +83,15 @@ def run_contrastive_pretraining(cfg, device, model, ckpt_dir):
         weight_decay=0.05 if not supervised else 0.01
     )
     
-    # Scheduler OneCycle: ideale per evitare plateau della loss a 6.0
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=cfg.experiment.learning_rate, 
-        epochs=cfg.experiment.epochs, steps_per_epoch=len(train_loader),
-        pct_start=0.1, div_factor=25, final_div_factor=1e4
-    )
+    
+   # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+   #     optimizer, max_lr=cfg.experiment.learning_rate, 
+   #     epochs=cfg.experiment.epochs, steps_per_epoch=len(train_loader),
+   #     pct_start=0.5, div_factor=25, final_div_factor=1e4
+   # )
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.experiment.epochs*len(train_loader))
+
     
     
     criterion = ContrastiveLoss(temperature=temp, supervised=supervised).to(device)
@@ -135,7 +139,7 @@ def run_contrastive_pretraining(cfg, device, model, ckpt_dir):
             scheduler.step()
             
             epoch_loss += loss.item()
-            pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{scheduler.get_last_lr()[0]:.6f}')
+            pbar.set_postfix(loss=f'{loss.item():.6f}', lr=f'{scheduler.get_last_lr()[0]:.6f}')
         
         avg_loss = epoch_loss / len(train_loader)
         wandb.log({'pretrain/loss': avg_loss, 'pretrain/epoch': epoch+1, 'pretrain/lr': scheduler.get_last_lr()[0]})
@@ -152,61 +156,90 @@ def run_contrastive_pretraining(cfg, device, model, ckpt_dir):
             torch.save(state, ckpt_dir / 'pretrained_encoder.pth')
 
     print(f"✨ Pretraining {mode_name} completato. Best Loss: {best_loss:.4f}")
-# --- LINEAR PROBING ---
 def run_linear_probe(cfg: DictConfig, device, model, ckpt_dir: Path, loss_weights: torch.Tensor):
     print(f"\n🔬 Linear Probing (Encoder Frozen)")
-    train_loader, class_names, _ = prepare_loader(cfg, 'train')
+    # Usa il loader bilanciato che abbiamo scritto prima!
+    train_loader, dataset, _ = prepare_loader(cfg, 'train')
     val_loader, _, _ = prepare_loader(cfg, 'val')
+    class_names = dataset.class_names
     
-    checkpoint = torch.load(ckpt_dir / 'pretrained_encoder.pth', map_location=device)
-    model.load_state_dict(checkpoint['model'])
+    # 1. Caricamento pesi con strict=False per ignorare il classificatore mancante
+    checkpoint = torch.load(ckpt_dir / 'pretrained_encoder.pth', map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint['model'], strict=False) # <--- AGGIUNTO strict=False
     
-    for param in model.parameters(): param.requires_grad = False
+    # 2. Congelamento TOTALE dell'encoder (Backbone + Projection)
+    for param in model.parameters(): 
+        param.requires_grad = False
     model.eval()
     
+    # 3. Definiamo il classificatore (usiamo quello già nel modello se esiste, o uno nuovo)
+    # Assicurati che hidden_dim sia 512 come nel tuo modello
     classifier = nn.Linear(cfg.model.hidden_dim, len(class_names)).to(device)
-    criterion = nn.CrossEntropyLoss(weight=loss_weights.to(device))
+    
+    criterion = nn.CrossEntropyLoss(weight=loss_weights.to(device),
+                                label_smoothing=0.2)
     optimizer = torch.optim.AdamW(classifier.parameters(), lr=cfg.experiment.get('probe_lr', 1e-3))
     
     best_f1 = 0.0
     for epoch in range(cfg.experiment.get('probe_epochs', 20)):
         classifier.train()
-        for x, labels in tqdm(train_loader, desc=f"Probe Epoch {epoch+1}"):
-            x, labels = x.to(device), labels.to(device)
+        for x, labels in tqdm(train_loader, desc=f"Probe Epoch {epoch+1}/{cfg.experiment.get('probe_epochs', 20)}"):
+            x, labels = x.to(device), labels.to(device).long()
+            
             optimizer.zero_grad()
-            with torch.no_grad(): features, _ = model(x)
+            
+            # Estrazione feature senza calcolare gradienti (risparmio VRAM)
+            with torch.no_grad():
+                # features è l'output 'h' del tuo modello
+                features, _ = model(x) 
+            
             logits = classifier(features)
             loss = criterion(logits, labels)
+            
             loss.backward()
             optimizer.step()
             
+        # --- VALIDAZIONE ---
         classifier.eval()
         all_preds, all_labels = [], []
         with torch.no_grad():
             for x, labels in val_loader:
                 x, labels = x.to(device), labels.to(device)
-                features, _ = model(x)
-                all_preds.extend(classifier(features).argmax(1).cpu().numpy())
+                h, _ = model(x)
+                all_preds.extend(classifier(h).argmax(1).cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
         
-        f1 = f1_score(all_labels, all_preds, average='macro')
+        # Uso di F1 Macro per valutare correttamente le classi rare (Recall 15%)
+        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        from sklearn.metrics import balanced_accuracy_score
         b_acc = balanced_accuracy_score(all_labels, all_preds)
-        print(f"Probe F1: {f1:.4f} | B-Acc: {b_acc:.2%}")
+        
+        print(f"📊 Probe Epoch {epoch+1} | F1 Macro: {f1:.4f} | Balanced Acc: {b_acc:.2%}")
         
         if f1 > best_f1:
             best_f1 = f1
-            torch.save({'encoder': model.state_dict(), 'classifier': classifier.state_dict(), 'class_names': class_names}, ckpt_dir / 'best_linear_probe.pth')
+            # Salvataggio checkpoint completo per il fine-tuning successivo
+            torch.save({
+                'encoder': model.state_dict(), 
+                'classifier': classifier.state_dict(), 
+                'class_names': class_names
+            }, ckpt_dir / 'best_linear_probe.pth')
             
     return best_f1
+
 
 # --- FINE-TUNING ---
 def run_fine_tuning(cfg, device, model, ckpt_dir, loss_weights: torch.Tensor):
     print(f"\n🎯 Starting End-to-End Fine-Tuning | Target: SOTA Recall")
     
     # 1. Caricamento pesi dal Pre-training (SupCon o SimCLR)
-    checkpoint = torch.load(ckpt_dir / 'pretrained_encoder.pth', map_location=device)
+    checkpoint = torch.load(ckpt_dir / 'pretrained_encoder.pth', map_location=device,weights_only=False)
     model.load_state_dict(checkpoint['model'], strict=False)
     
+    for param in model.parameters():
+        param.requires_grad = True
+
+    model.train()
     # 2. Re-inizializzazione Head (Classificatore lineare sulle feature 'h')
     train_loader, dataset, _ = prepare_loader(cfg, 'train')
     val_loader, _, _ = prepare_loader(cfg, 'val')
@@ -329,7 +362,7 @@ def main(cfg: DictConfig):
     
     wandb.init(project=cfg.logger.wandb.project, name=f"{mode_name}_{cfg.data.file_name}", config=OmegaConf.to_container(cfg))
     
-    from src.models import SimCLR # Assicurati che SimCLR accetti questi parametri
+     # Assicurati che SimCLR accetti questi parametri
     model = SimCLR(input_dim=cfg.data.input_dim, hidden_dim=cfg.model.hidden_dim, out_dim=cfg.model.out_dim).to(device)
     
     # 1. Carica pesi loss una volta sola
@@ -337,6 +370,14 @@ def main(cfg: DictConfig):
     
     stage = cfg.get('stage', 'all')
     if stage in ['all', 'pretrain']: run_contrastive_pretraining(cfg, device, model, ckpt_dir)
+         # PULIZIA MANUALE PER 2060
+    del model # Eliminiamo l'istanza temporanea
+    torch.cuda.empty_cache() # Svuotiamo la VRAM
+    import gc
+    gc.collect()
+    
+    # Ricarichiamo il modello fresco per il Probing
+    model = SimCLR(input_dim=40, num_classes=9).to(device) 
     if stage in ['all', 'probe']: run_linear_probe(cfg, device, model, ckpt_dir, loss_weights)
     if stage in ['all', 'finetune']: run_fine_tuning(cfg, device, model, ckpt_dir, loss_weights)
     if stage in ['all', 'test']:
