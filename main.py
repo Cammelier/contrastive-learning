@@ -27,23 +27,21 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # --- NETFLOW AUGMENTATIONS ---
-def netflow_aug(x, noise_strength=0.02, drop_prob=0.1):
+def netflow_aug(x, noise_strength=0.02, drop_prob=0.1, corruption_rate=0.6):
     batch_size, num_features = x.shape
     device = x.device
-
-    # VIEW 1: Noise + Masking
-    noise1 = noise_strength * torch.randn_like(x)
-    mask1 = torch.rand_like(x) > drop_prob
-    x_i = x * mask1 + noise1
     
-    # VIEW 2: Swap Augmentation (Sostituzione parziale da altri campioni nel batch)
-    random_indices = torch.randperm(batch_size).to(device)
-    x_random = x[random_indices] 
-    swap_mask = torch.rand_like(x) < 0.15 
-    x_j = torch.where(swap_mask, x_random, x) 
-    x_j = x_j + noise_strength * torch.randn_like(x_j)
-
-    return x_i, x_j
+    x_corrupted = x.clone()
+    
+    mask = torch.rand_like(x) < corruption_rate
+    
+    shuffled_indices = torch.argsort(torch.rand(batch_size, num_features, device=device), dim=0)
+    
+    x_shuffled = torch.gather(x, 0, shuffled_indices)
+    
+    x_corrupted[mask] = x_shuffled[mask]
+    
+    return x, x_corrupted
 
 # --- CONTRASTIVE PRETRAINING ---
 def run_contrastive_pretraining(cfg, device, model, ckpt_dir):
@@ -84,11 +82,18 @@ def run_contrastive_pretraining(cfg, device, model, ckpt_dir):
     )
     
     
-   # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-   #     optimizer, max_lr=cfg.experiment.learning_rate, 
-   #     epochs=cfg.experiment.epochs, steps_per_epoch=len(train_loader),
-   #     pct_start=0.5, div_factor=25, final_div_factor=1e4
-   # )
+   # total_steps = cfg.experiment.epochs * len(train_loader)
+
+    # Scheduler OneCycle 
+    #scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #    optimizer,
+    #    max_lr=cfg.experiment.learning_rate,
+    #    total_steps=total_steps,
+    #    pct_start=0.1,  
+    #    div_factor=25,  
+    #    final_div_factor=1000, 
+    #    anneal_strategy='cos'
+    # )
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.experiment.epochs*len(train_loader))
 
@@ -110,7 +115,7 @@ def run_contrastive_pretraining(cfg, device, model, ckpt_dir):
             # Utilizzo di Mixed Precision per velocità e stabilità
             with autocast(dtype=torch.bfloat16):
                 # Augmentation: x_i e x_j sono due viste dello stesso batch bilanciato
-                x_i, x_j = netflow_aug(x) 
+                x_i, x_j = netflow_aug(x, corruption_rate=0.6) 
                 
                 # Forward unico su batch concatenato
                 _, z_combined = model(torch.cat([x_i, x_j], dim=0))

@@ -24,21 +24,23 @@ class NetFlowDataset(Dataset):
             label_col = cfg.data.label_col 
             
        
-        # 1. Estraction numeric data
+        # 1. Numerici (Scale them)
         features_num = df[num_cols].values.astype(np.float32)
-        
-        # 2. Log-transformation
         features_num = np.log1p(np.maximum(features_num, 0))
-        
-        # 3. StandardScaler
         scaler = StandardScaler()
-        features_num = scaler.fit_transform(features_num)
-        
-        features_cat = df[cat_cols].values.astype(np.float32)
-        
-        # 4. Concatenate features
-        self.features = np.hstack([features_num, features_cat])
-        # --------------------------------------------------
+        self.features_num = scaler.fit_transform(features_num) # Salva in self
+    
+    # 2. Categorici (NON SCALARLI, convertili solo in interi per Embedding)
+    # Assicurati che siano già codificati da 0 a N-1 nel preprocessing
+        self.features_cat = df[cat_cols].values.astype(np.int64) 
+    
+    # Calcola dimensioni per gli embedding (servirà al modello)
+    # Lista di tuple: (numero_categorie, dimensione_embedding)
+        self.cat_dims = []
+        for col_idx in range(self.features_cat.shape[1]):
+            n_cat = len(np.unique(self.features_cat[:, col_idx])) + 1 # +1 sicurezza
+            emb_dim = min(50, (n_cat + 1) // 2) # Regola empirica
+            self.cat_dims.append((n_cat, emb_dim))
 
         self.labels = df[label_col].values.astype(np.int64)
         
@@ -52,9 +54,10 @@ class NetFlowDataset(Dataset):
         return len(self.features)
 
     def __getitem__(self, idx):
-        x = torch.from_numpy(self.features[idx])
+        x_num = torch.from_numpy(self.features_num[idx])
+        x_cat = torch.from_numpy(self.features_cat[idx])
         y = torch.tensor(self.labels[idx], dtype=torch.long)
-        return x, y
+        return (x_num, x_cat), y
 
 def prepare_loader(cfg, split='train'):
     dataset = NetFlowDataset(cfg, split)
