@@ -193,7 +193,9 @@ def run_fine_tuning(cfg, device, model, ckpt_dir, loss_weights):
         for (x_num, x_cat), labels in tqdm(train_loader, desc=f"FT Epoch {epoch+1}"):
             x_num, x_cat, labels = x_num.to(device), x_cat.to(device), labels.to(device)
             optimizer.zero_grad()
-            with autocast(dtype=torch.bfloat16):
+
+            with autocast(device_type='cuda', dtype=torch.bfloat16):
+
                 # Forward completo (SimCLR gestisce l'input tupla)
                 h, _ = model((x_num, x_cat))
                 logits = model.classifier(h)

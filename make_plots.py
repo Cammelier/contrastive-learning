@@ -1,143 +1,142 @@
-print("🟢 SCRIPT AVVIATO: Inizio importazione moduli...") # DEBUG PRINT
-
 import hydra
 import torch
 import torch.nn as nn
 import numpy as np
+import os
 from pathlib import Path
 from omegaconf import DictConfig, ListConfig
+from tqdm import tqdm
 
-# Fix per PyTorch 2.6+
+# Fix per PyTorch 2.6+ e compatibilità Hydra
 torch.serialization.add_safe_globals([DictConfig, ListConfig, dict])
 
-# Import dei tuoi moduli (Assicurati che src/common/plots.py sia quello che ti ho mandato prima!)
 from src.models import SimCLR
 from src.datasets import prepare_loader
 from src.common.plots import plot_tsne, plot_confusion_matrix
 
-print("🟢 MODULI IMPORTATI. Configurazione funzione Load Model...") # DEBUG PRINT
-
-# --- FUNZIONI LOCALI ---
-
-def load_model(cfg, checkpoint_path, device):
+def load_model(cfg, checkpoint_path, device, input_dim_num, cat_dims, num_classes):
+    """
+    Carica il modello SimCLR inizializzandolo con le dimensioni reali del training set.
+    """
     print(f"📂 Caricamento pesi da: {checkpoint_path}")
     
-    # Istanziazione Modello Base
+    # Inizializzazione basata sulla struttura definita in src/models.py
     model = SimCLR(
-        input_dim=cfg.data.input_dim, 
-        hidden_dim=cfg.model.hidden_dim, 
-        out_dim=cfg.model.out_dim
+        input_dim_num=input_dim_num,
+        cat_dims=cat_dims,
+        out_dim=cfg.model.out_dim,
+        hidden_dim=cfg.model.hidden_dim,
+        num_classes=num_classes
     ).to(device)
     
-    # Caricamento Checkpoint (Con fix per il bug UnpicklingError)
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Caricamento checkpoint (weights_only=False per DictConfig)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Estrazione pesi corretti
-    if 'model' in checkpoint: state_dict = checkpoint['model']
-    elif 'encoder' in checkpoint: state_dict = checkpoint['encoder']
-    elif 'model_state_dict' in checkpoint: state_dict = checkpoint['model_state_dict']
-    else: state_dict = checkpoint
+    # Mappatura state_dict basata sulle diverse fasi di salvataggio del main.py
+    if 'model' in checkpoint:
+        state_dict = checkpoint['model']
+    elif 'encoder' in checkpoint:
+        state_dict = checkpoint['encoder']
+    elif 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
 
     model.load_state_dict(state_dict, strict=False)
     
-    # Se c'è un classificatore (per confusion matrix), carichiamolo
+    # Caricamento testa di classificazione se presente (per Finetuning o Linear Probe)
     if 'classifier' in checkpoint:
         print("   -> Trovata testa di classificazione. Caricamento...")
-        num_classes = 9 
-        if 'class_names' in checkpoint: num_classes = len(checkpoint['class_names'])
-        
-        model.classifier = nn.Linear(cfg.model.hidden_dim, num_classes).to(device)
-        model.classifier.load_state_dict(checkpoint['classifier'])
+        # Se i pesi sono salvati separatamente (Linear Probe)
+        if isinstance(checkpoint.get('classifier'), dict):
+            model.classifier = nn.Linear(cfg.model.hidden_dim, num_classes).to(device)
+            model.classifier.load_state_dict(checkpoint['classifier'])
     
     model.eval()
     return model
 
 def run_inference_preds(model, loader, device):
-    """Serve solo per la Confusion Matrix"""
-    if not hasattr(model, 'classifier'): return None, None
-    results, targets = [], []
+    """
+    Esegue l'inferenza sul test set per la Confusion Matrix.
+    """
+    model.eval()
+    all_preds, all_labels = [], []
     
-    # Import tqdm qui per sicurezza
-    from tqdm import tqdm
     with torch.no_grad():
-        for batch in tqdm(loader, desc="Inference Preds"):
-            if isinstance(batch, (list, tuple)): x, y = batch[0], batch[1]
-            else: x, y = batch, torch.zeros(len(batch))
+        for (x_num, x_cat), labels in tqdm(loader, desc="Inference Preds", leave=False):
+            x_num, x_cat = x_num.to(device), x_cat.to(device)
             
-            x = x.to(device)
-            features = model(x)
-            # Gestione output tupla di SimCLR
-            if isinstance(features, tuple): features = features[0]
+            # Forward pass (Input come tupla come richiesto da src/models.py)
+            h, _ = model((x_num, x_cat))
             
-            logits = model.classifier(features)
-            preds = logits.argmax(1)
-            results.append(preds.cpu().numpy())
-            targets.append(y.numpy())
-            
-    return np.concatenate(results), np.concatenate(targets)
-
-
-# --- MAIN ---
+            if hasattr(model, 'classifier'):
+                logits = model.classifier(h)
+                all_preds.extend(logits.argmax(1).cpu().numpy())
+                all_labels.extend(labels.numpy())
+            else:
+                return None, None
+                
+    return np.array(all_labels), np.array(all_preds)
 
 @hydra.main(version_base="1.2", config_path="config", config_name="config")
 def main(cfg: DictConfig):
-    print("🚀 MAIN PARTITO. Inizializzazione...") # DEBUG PRINT
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     root_dir = Path(hydra.utils.get_original_cwd())
     
-    # Cartella Output
+    # 1. Caricamento Train Dataset SOLO per le dimensioni (risolve il size mismatch)
+    print("📊 Caricamento Train Dataset per inizializzazione dimensioni...")
+    _, train_dataset, _ = prepare_loader(cfg, 'train')
+    
+    input_dim_num = train_dataset.features_num.shape[1] # 29
+    cat_dims = train_dataset.cat_dims # Lista delle cardinalità/embedding
+    class_names = train_dataset.class_names
+    num_classes = len(class_names)
+    
+    # 2. Caricamento Test Loader per le inferenze reali
+    print("📊 Caricamento Test Loader per generazione grafici...")
+    test_loader, _, _ = prepare_loader(cfg, 'test')
+    
     plots_dir = root_dir / "thesis_plots"
     plots_dir.mkdir(exist_ok=True)
     
-    # Dataset
-    print("📊 Preparazione Test Loader...")
-    test_loader, dataset, _ = prepare_loader(cfg, split='test')
-    class_names = getattr(dataset, 'class_names', [str(i) for i in range(9)])
-    
-    # Lista Checkpoint da processare
+    # Mappatura dei checkpoint da processare
     checkpoints_to_plot = {
         "SimCLR_Pretrained": root_dir / "checkpoints/simclr/pretrained_encoder.pth",
-        "SupCon_Pretrained": root_dir / "checkpoints/supcon/pretrained_encoder.pth",
         "SimCLR_Finetuned":  root_dir / "checkpoints/simclr/best_finetuned.pth",
-        "SupCon_Finetuned":  root_dir / "checkpoints/supcon/best_finetuned.pth"
+        "Linear_Probe":      root_dir / "checkpoints/simclr/best_linear_probe.pth",
+
+        # --- Modelli SupCon ---
+        "SupCon_Pretrained": root_dir / "checkpoints/supcon/pretrained_encoder.pth",
+        "SupCon_Finetuned":  root_dir / "checkpoints/supcon/best_finetuned.pth",
+        "SupCon_Probe":      root_dir / "checkpoints/supcon/best_linear_probe.pth"
     }
 
     for name, path in checkpoints_to_plot.items():
         if not path.exists():
-            print(f"⚠️ FILE MANCANTE: {name} (Cercato in: {path})")
+            print(f"⚠️ Saltato: {name} (File non trovato in {path})")
             continue
             
-        print(f"\n------------------------------------------------")
-        print(f"🎨 ELABORAZIONE: {name}")
-        print(f"------------------------------------------------")
+        print(f"\n🎨 Elaborazione: {name}")
         
         try:
-            model = load_model(cfg, path, device)
+            # Inizializzazione sicura con dimensioni da training set
+            model = load_model(cfg, path, device, input_dim_num, cat_dims, num_classes)
             
-            # 1. t-SNE (Sempre)
-            # Chiama la funzione che hai sistemato in src/common/plots.py
-            plot_tsne(model, test_loader, device, "FINAL", name, class_names, str(plots_dir))
+            # A. Generazione t-SNE dello spazio latente (backbone output h)
+            print("   -> Generazione t-SNE...")
+            plot_tsne(model, test_loader, device, "Final", name, class_names, str(plots_dir))
             
-            # 2. Confusion Matrix (Solo se finetuned)
-            if "Finetuned" in name:
-                print("   -> Calcolo predizioni per Confusion Matrix...")
-                preds, labels = run_inference_preds(model, test_loader, device)
-                if preds is not None:
+            # B. Generazione Confusion Matrix (solo se il modello è addestrato alla classificazione)
+            if "Finetuned" in name or "Probe" in name:
+                print("   -> Generazione Confusion Matrix...")
+                labels, preds = run_inference_preds(model, test_loader, device)
+                if labels is not None:
                     plot_confusion_matrix(labels, preds, class_names, name, str(plots_dir))
-                else:
-                    print("   -> Skip CM: Nessun classificatore trovato nel modello.")
                     
         except Exception as e:
-            print(f"❌ ERRORE CRITICO SU {name}: {e}")
-            import traceback
-            traceback.print_exc() # Stampa l'errore completo per capire cosa non va
+            print(f"❌ Errore critico su {name}: {e}")
 
-    print(f"\n✅ SCRIPT COMPLETATO. Controlla la cartella: {plots_dir}")
+    print(f"\n✅ Operazione completata. Grafici disponibili in: {plots_dir}")
 
-# --- PUNTO DI INGRESSO (IMPORTANTE!) ---
 if __name__ == "__main__":
     main()
