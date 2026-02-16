@@ -14,6 +14,7 @@ class NetFlowDataset(Dataset):
         if not file_path.exists():
             raise FileNotFoundError(f"File non trovato: {file_path}")
 
+        # load_df legge automaticamente .parquet se l'estensione è corretta
         df = load_df(str(file_path))
         
         num_cols = list(cfg.data.num_cols)
@@ -23,35 +24,32 @@ class NetFlowDataset(Dataset):
         if label_col not in df.columns:
             label_col = cfg.data.label_col 
             
-       
-        # 1. Numerici (Scale them)
+        # 1. Feature Numeriche
         features_num = df[num_cols].values.astype(np.float32)
         features_num = np.log1p(np.maximum(features_num, 0))
         scaler = StandardScaler()
-        self.features_num = scaler.fit_transform(features_num) # Salva in self
+        self.features_num = scaler.fit_transform(features_num)
     
-    # 2. Categorici (NON SCALARLI, convertili solo in interi per Embedding)
-    # Assicurati che siano già codificati da 0 a N-1 nel preprocessing
+        # 2. Feature Categoriche
         self.features_cat = df[cat_cols].values.astype(np.int64) 
     
-    # Calcola dimensioni per gli embedding (servirà al modello)
-    # Lista di tuple: (numero_categorie, dimensione_embedding)
+        # Calcolo dimensioni per gli embedding
         self.cat_dims = []
         for col_idx in range(self.features_cat.shape[1]):
-            n_cat = len(np.unique(self.features_cat[:, col_idx])) + 1 # +1 sicurezza
-            emb_dim = min(50, (n_cat + 1) // 2) # Regola empirica
+            n_cat = int(self.features_cat[:, col_idx].max() + 1)
+            emb_dim = min(50, (n_cat + 1) // 2)
             self.cat_dims.append((n_cat, emb_dim))
 
         self.labels = df[label_col].values.astype(np.int64)
-        
         self.num_classes = len(np.unique(self.labels))
         self.class_names = [str(c) for c in np.unique(self.labels)]
         
         print(f"[{split.upper()}] Caricati {len(df)} campioni.")
-        print(f"[{split.upper()}] Feature Scaled: {self.features.shape[1]} | Classi: {self.num_classes}")
+        # FIX: Usiamo features_num per la stampa invece di features
+        print(f"[{split.upper()}] Feature Numeriche: {self.features_num.shape[1]} | Categoriche: {self.features_cat.shape[1]}")
 
     def __len__(self): 
-        return len(self.features)
+        return len(self.labels)
 
     def __getitem__(self, idx):
         x_num = torch.from_numpy(self.features_num[idx])
