@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import wandb
 import logging
 import numpy as np
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from omegaconf import ListConfig
 
 torch.serialization.add_safe_globals([DictConfig, ListConfig, dict])
@@ -16,7 +16,7 @@ from torch.amp import autocast, GradScaler
 from sklearn.metrics import f1_score, classification_report, balanced_accuracy_score
 from src.datasets import prepare_loader
 from src.common.plots import plot_confusion_matrix, plot_tsne
-from src.losses import ContrastiveLoss
+from src.losses import ContrastiveLoss, FocalLoss
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from src.models import SimCLR
 
@@ -152,7 +152,7 @@ def run_linear_probe(cfg, device, model, ckpt_dir, loss_weights):
     model.eval()
     
     classifier = nn.Linear(cfg.model.hidden_dim, len(dataset.class_names)).to(device)
-    criterion = nn.CrossEntropyLoss(weight=loss_weights.to(device))
+    criterion = FocalLoss(alpha=loss_weights.to(device), gamma=2.0).to(device) # o focalloss o crossentropy semplice
     optimizer = torch.optim.AdamW(classifier.parameters(), lr=1e-3)
     
     for epoch in range(10): # Probe rapido
@@ -175,6 +175,10 @@ def run_fine_tuning(cfg, device, model, ckpt_dir, loss_weights):
     model.load_state_dict(checkpoint['model'], strict=False)
     for param in model.parameters(): param.requires_grad = True
     
+    with open_dict(cfg):
+        if hasattr(cfg, 'data'):
+            cfg.data.use_sampler = False
+    
     train_loader, _, _ = prepare_loader(cfg, 'train')
     val_loader, dataset, _ = prepare_loader(cfg, 'val') # Serve dataset per class names
     model.classifier = nn.Linear(cfg.model.hidden_dim, len(dataset.class_names)).to(device)
@@ -185,7 +189,7 @@ def run_fine_tuning(cfg, device, model, ckpt_dir, loss_weights):
         {'params': model.embeddings.parameters(), 'lr': 1e-5}, # Embeddings lenti
         {'params': model.classifier.parameters(), 'lr': 1e-3}
     ])
-    criterion = nn.CrossEntropyLoss(weight=loss_weights.to(device))
+    criterion = FocalLoss(alpha=loss_weights.to(device), gamma=2.0).to(device) 
     scaler = GradScaler()
     
     for epoch in range(cfg.experiment.get('ft_epochs', 20)):
@@ -238,6 +242,7 @@ def run_testing(cfg, device, model, ckpt_dir, mode='finetuned'):
              model.classifier = nn.Linear(cfg.model.hidden_dim, len(checkpoint['class_names'])).to(device)
         classifier = model.classifier
 
+    
     test_loader, dataset, _ = prepare_loader(cfg, 'test')
     model.eval(); classifier.eval()
     
