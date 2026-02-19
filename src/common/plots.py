@@ -24,17 +24,15 @@ def extract_features(model, loader, device):
     features_list, labels_list = [], []
     with torch.no_grad():
         for batch in tqdm(loader, desc="Extracting features", leave=False):
-            # Gestione tupla NetFlow (x_num, x_cat)
             (x_num, x_cat), target = batch
             
             x_num = x_num.to(device)
             x_cat = x_cat.to(device)
             
-            # Forward pass passando la tupla come nel main.py
             output = model((x_num, x_cat))
             
             if isinstance(output, tuple):
-                h = output[0]  # Prende le feature dal backbone
+                h = output[0]
             else:
                 h = output
                 
@@ -46,19 +44,30 @@ def extract_features(model, loader, device):
 def plot_tsne(model, loader, device, epoch, mode_name, class_names, save_dir="plots"):
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     X_full, y_full = extract_features(model, loader, device)
+    
     X, y = get_stratified_samples(X_full, y_full, samples_per_class=300)
     
     tsne = TSNE(n_components=2, perplexity=30, random_state=42)
     X_embedded = tsne.fit_transform(X)
     
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(14, 10)) 
+    
     labels_str = [class_names[int(i)] for i in y]
     
-    sns.scatterplot(x=X_embedded[:, 0], y=X_embedded[:, 1], hue=labels_str, alpha=0.7)
-    plt.title(f"t-SNE: {mode_name}")
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
-    filename = Path(save_dir) / f"tsne_{mode_name}.png"
+    sns.scatterplot(x=X_embedded[:, 0], y=X_embedded[:, 1], 
+                    hue=labels_str, 
+                    hue_order=class_names, 
+                    palette="tab10", 
+                    alpha=0.7, 
+                    edgecolor='w', 
+                    linewidth=0.5)
+    
+    plt.title(f"t-SNE Visualization: {mode_name} (Epoch {epoch})", fontsize=15)
+    plt.legend(title="Classes", bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, linestyle='--', alpha=0.3)
+    
+    filename = Path(save_dir) / f"tsne_{mode_name}_ep{epoch}.png"
     plt.savefig(filename, bbox_inches='tight', dpi=300)
     plt.close()
     print(f"✅ t-SNE salvato in: {filename}")
@@ -67,10 +76,15 @@ def plot_confusion_matrix(all_labels, all_preds, class_names, mode, save_dir="pl
     cm = confusion_matrix(all_labels, all_preds)
     cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     
-    plt.figure(figsize=(12, 10))
+    plt.figure(figsize=(14, 12))
     sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", 
-                xticklabels=class_names, yticklabels=class_names)
-    plt.title(f"Confusion Matrix - {mode}")
+                xticklabels=class_names, 
+                yticklabels=class_names,
+                annot_kws={"size": 10})
+    
+    plt.ylabel('True Label', fontsize=12)
+    plt.xlabel('Predicted Label', fontsize=12)
+    plt.title(f"Confusion Matrix (Normalized) - {mode}", fontsize=15)
     
     filename = Path(save_dir) / f"cm_{mode}.png"
     plt.savefig(filename, bbox_inches='tight', dpi=300)
