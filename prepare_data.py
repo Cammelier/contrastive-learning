@@ -25,33 +25,47 @@ from src.data.preprocessing import (
 setup_logger()
 logger = logging.getLogger(__name__)
 
-
 def preprocess_df(
     df: pd.DataFrame,
     cfg: Any,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Preprocess dataframe for machine learning tasks.
-    Applies filtering, encoding, scaling, and train/val/test splitting.
+    Mantiene tutte le classi presenti nel dataset originale.
     """
-    # Extract parameters from cfg
+    # Estrazione parametri dal config
     num_cols = list(cfg.data.num_cols)
     cat_cols = list(cfg.data.cat_cols)
     label_col = cfg.data.label_col
     benign_tag = cfg.data.benign_tag
     query = cfg.data.filter_query
-    min_cat_count = cfg.data.min_cat_count
+    
+    # Parametri critici per non perdere classi
+    # Se min_cat_count è > 1, le classi rare spariscono!
+    min_cat_count = cfg.data.get('min_cat_count', 1) 
+    
     top_n_categories = cfg.data.top_n_categories
     train_frac = cfg.data.train_frac
     val_frac = cfg.data.val_frac
     test_frac = cfg.data.test_frac
     random_state = cfg.seed
 
-    # Global preprocessing steps
+    # 1. Pulizia iniziale
     df = drop_nans(df, num_cols + cat_cols + [label_col])
-    df = query_filter(df, query)
+    
+    # 2. Filtro query (se definito nel yaml)
+    if query:
+        df = query_filter(df, query)
+    
+    # 3. Filtro categorie rare (impostato a 1 per non eliminare classi di attacco)
+    logger.info(f"Applicazione rare_category_filter con min_count={min_cat_count}")
     df = rare_category_filter(df, [label_col], min_count=min_cat_count)
 
+    # Verifica classi presenti prima dello split
+    unique_labels = df[label_col].unique()
+    logger.info(f"Classi totali rilevate prima dello split ({len(unique_labels)}): {unique_labels}")
+
+    # 4. Split del dataset
     train_df, val_df, test_df = ml_split(
         df,
         train_frac=train_frac,
@@ -61,9 +75,10 @@ def preprocess_df(
         label_col=label_col,
     )
 
-    # Make sklearn transformers/ColumnTransformer return pandas DataFrames
+    # Configurazione Sklearn per restituire DataFrame
     set_config(transform_output="pandas")
 
+    # Pipeline Numerica
     num_pipeline = Pipeline(
         steps=[
             ("quantile_clipper", QuantileClipper()),
@@ -71,6 +86,7 @@ def preprocess_df(
         ]
     )
 
+    # Pipeline Categorica
     cat_pipeline = Pipeline(
         steps=[
             ("top_n_encoder", TopNCategoryEncoder(top_n=top_n_categories)),
@@ -86,18 +102,25 @@ def preprocess_df(
         verbose_feature_names_out=False,
     )
 
+    # Fit e Transform
+    logger.info("Fitting transformers...")
     preprocessor.fit(train_df)
     train_df = preprocessor.transform(train_df)
     val_df = preprocessor.transform(val_df)
     test_df = preprocessor.transform(test_df)
 
-    # Encode label column
+    # 5. Encoding delle Label (Cruciale per le 10 classi)
     label_encoder = LabelEncoder()
     multi_label_col = f"multi_{label_col}"
-    train_df[multi_label_col] = label_encoder.fit_transform(train_df[label_col])
+    
+    # Fit sul dataset intero per essere sicuri di mappare tutte le classi
+    label_encoder.fit(df[label_col])
+    
+    train_df[multi_label_col] = label_encoder.transform(train_df[label_col])
     val_df[multi_label_col] = label_encoder.transform(val_df[label_col])
     test_df[multi_label_col] = label_encoder.transform(test_df[label_col])
 
+    # 6. Label Binaria (opzionale, utile per task secondari)
     if benign_tag is not None:
         bin_label_col = f"bin_{label_col}"
         train_df[bin_label_col] = (train_df[label_col] != benign_tag).astype(int)
@@ -107,20 +130,20 @@ def preprocess_df(
     label_mapping = {
         int(i): str(class_name) for i, class_name in enumerate(label_encoder.classes_)
     }
-    logger.info(f"Label mapping: {label_mapping}")
+    logger.info(f"Label mapping finale: {label_mapping}")
 
-    # Prepare and save metadata
+    # 7. Salvataggio Metadati
     metadata = {
         "label_mapping": label_mapping,
+        "num_classes": len(label_encoder.classes_),
         "dataset_sizes": {
             "train": len(train_df),
             "val": len(val_df),
             "test": len(test_df),
-            "total": len(train_df) + len(val_df) + len(test_df),
+            "total": len(df),
         },
         "samples_per_class": {
             "train": train_df[label_col].value_counts().to_dict(),
-            "val": val_df[label_col].value_counts().to_dict(),
             "test": test_df[label_col].value_counts().to_dict(),
         },
     }
@@ -129,60 +152,40 @@ def preprocess_df(
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
-    logger.info(f"Dataset metadata saved to {metadata_path}")
-
+    
     return train_df, val_df, test_df
 
-
 def main() -> None:
-    """Main entry point for data preparation."""
+    """Main entry point per la preparazione dati."""
     cfg = load_config(
         config_path=Path(__file__).parent / "config",
         config_name="config",
         overrides=sys.argv[1:],
     )
 
-    # Load raw data
-    logger.info("Loading raw data...")
+    logger.info(f"Lavoro su dataset: {cfg.data.file_name}")
     raw_data_path = Path(cfg.path.raw_data) / f"{cfg.data.file_name}.csv"
+    
+    if not raw_data_path.exists():
+        logger.error(f"File non trovato: {raw_data_path}")
+        return
+
+    # Caricamento
     df = load_df(str(raw_data_path))
 
-    # Preprocess data
-    logger.info("Preprocessing data...")
+    # Preprocessing
     train_df, val_df, test_df = preprocess_df(df, cfg)
 
-    # Save processed data
-    logger.info("Saving processed data...")
+    # Salvataggio Split
     processed_data_dir = Path(cfg.path.processed_data)
     processed_data_dir.mkdir(parents=True, exist_ok=True)
 
-    for split_name, split_df in [
-        ("train", train_df),
-        ("val", val_df),
-        ("test", test_df),
-    ]:
-        output_path = (
-            processed_data_dir
-            / f"{cfg.data.file_name}_{split_name}.{cfg.data.extension}"
-        )
+    for split_name, split_df in [("train", train_df), ("val", val_df), ("test", test_df)]:
+        output_path = processed_data_dir / f"{cfg.data.file_name}_{split_name}.{cfg.data.extension}"
         save_df(split_df, str(output_path))
-    logger.info(f"Saved {split_name} data: {len(split_df)} samples")
+        logger.info(f"Salvato {split_name}: {len(split_df)} campioni")
 
-
-    data_dir = Path("data")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    full_df = pd.concat([
-    train_df.assign(split='train'),
-    val_df.assign(split='val'),
-    test_df.assign(split='test')
-    ])
-    full_path = data_dir / f"{cfg.data.file_name}.{cfg.data.extension}"
-    save_df(full_df, str(full_path))
-    
-
-logger.info("Data preparation complete!")
-
-
+    logger.info("Preparazione dati completata con successo!")
 
 if __name__ == "__main__":
     main()
