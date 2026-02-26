@@ -41,19 +41,18 @@ class_names= ["backdoor",
 
 # --- UTILS: BILANCIAMENTO DINAMICO ---
 def compute_class_weights(dataset, device):
-    """
-    Calcola i pesi per bilanciare le classi: peso = N_totale / (N_classi * N_campioni_classe)
-    Garantisce che ogni classe abbia lo stesso impatto sulla loss.
-    """
     labels = np.array(dataset.labels)
     num_classes = len(dataset.class_names)
     class_counts = np.bincount(labels, minlength=num_classes)
-    
-    # Evitiamo divisioni per zero per classi mancanti nello split
     class_counts = np.where(class_counts == 0, 1, class_counts)
+
+    # Calcolo logaritmico: riduce il divario tra pesi minimi e massimi
+    weights = np.log(len(labels)) / np.log(class_counts)
     
-    weights = torch.tensor(len(labels) / (num_classes * class_counts), dtype=torch.float)
-    return weights.to(device)
+    # Normalizzazione per far sì che il peso medio sia 1.0
+    weights = weights / weights.mean()
+    
+    return torch.tensor(weights, dtype=torch.float).to(device)
 
 # --- NETFLOW AUGMENTATIONS (SCARF) ---
 def scarf_aug(x, corruption_rate=0.6):
@@ -240,34 +239,56 @@ def run_testing(cfg, device, model, ckpt_dir, mode='finetuned'):
 
 @hydra.main(version_base="1.2", config_path="config", config_name="config")
 def main(cfg: DictConfig):
+    # 1. Configurazione Iniziale
     root_dir = Path(hydra.utils.get_original_cwd())
     ckpt_dir = root_dir / f"checkpoints/{'supcon' if cfg.experiment.get('supervised') else 'simclr'}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
+    print("DEBUG: Script avviato, caricamento librerie completato...")
+    # Inizializza WandB
     wandb.init(project=cfg.logger.wandb.project, config=OmegaConf.to_container(cfg))
     
-    # Caricamento train per inizializzazione
-    _, train_dataset, _ = prepare_loader(cfg, 'train')
-    num_classes = len(train_dataset.class_names)
+    # 2. Caricamento Dataset e Identificazione Classi (FIX NAMEERROR)
+    print("🚀 Caricamento dataset per inizializzazione...")
+    # Salviamo esplicitamente l'oggetto dataset restituito come secondo valore
+    _, train_ds, _ = prepare_loader(cfg, 'train')
     
+    # Estraiamo i nomi delle classi REALI trovati nel dataset
+    detected_names = [str(c) for c in train_ds.class_names]
+    n_classes = len(detected_names)
+
+    
+
+    # 3. Inizializzazione Modello con num_classes dinamico
     model = SimCLR(
-        input_dim_num=train_dataset.features_num.shape[1],
-        cat_dims=train_dataset.cat_dims,
+        input_dim_num=train_ds.features_num.shape[1],
+        cat_dims=train_ds.cat_dims,
         out_dim=cfg.model.out_dim,
         hidden_dim=cfg.model.hidden_dim,
-        num_classes=num_classes
+        num_classes=n_classes 
     ).to(device)
     
+    # 4. Gestione Stage
     stage = cfg.get('stage', 'all')
-    if stage in ['all', 'pretrain']: run_contrastive_pretraining(cfg, device, model, ckpt_dir, train_dataset)
-    if stage in ['all', 'probe']: run_linear_probe(cfg, device, model, ckpt_dir, None)
-    if stage in ['all', 'finetune']: run_fine_tuning(cfg, device, model, ckpt_dir, None)
+    
+    # Nota: passiamo train_ds (non dataset) per coerenza con l'assegnazione sopra
+    if stage in ['all', 'pretrain']: 
+        run_contrastive_pretraining(cfg, device, model, ckpt_dir, train_ds)
+    
+    if stage in ['all', 'probe']: 
+        run_linear_probe(cfg, device, model, ckpt_dir, None)
+        
+    if stage in ['all', 'finetune']: 
+        run_fine_tuning(cfg, device, model, ckpt_dir, None)
+        
     if stage in ['all', 'test']:
+        # Se n_classes è cambiato rispetto al pretrain, lo stage test 
+        # potrebbe richiedere un nuovo Linear Probe per evitare size mismatch
         run_testing(cfg, device, model, ckpt_dir, mode='linear_probe')
         run_testing(cfg, device, model, ckpt_dir, mode='finetuned')
     
     wandb.finish()
-
+    
 if __name__ == "__main__":
     main()

@@ -42,8 +42,7 @@ class NetFlowDataset(Dataset):
 
         self.labels = df[label_col].values.astype(np.int64)
         self.num_classes = len(np.unique(self.labels))
-        self.class_names = ["Benign", "Bot", "DDoS-HOIC", "DDoS-LOIC-HTTP", "DoS-GoldenEye", 
-               "DoS-Slowloris", "FTP-BruteForce", "Infiltration", "SSH-Bruteforce", "Web-Attack"]
+        self.class_names = ["Benign", "Bot", "Brute Force -Web", "Brute Force -XSS", "DDOS attack-HOIC","DDOS attack-LOIC-UDP", "DoS attacks-GoldenEye","DoS attacks-Hulk", "DoS attacks-SlowHTTPTest",   "DoS attacks-Slowloris", "Infiltration"]
         
         print(f"[{split.upper()}] Caricati {len(df)} campioni.")
         # FIX: Usiamo features_num per la stampa invece di features
