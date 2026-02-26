@@ -8,6 +8,10 @@ from sklearn.metrics import confusion_matrix
 from tqdm import tqdm
 from pathlib import Path
 
+
+# Forza il backend non-interattivo
+matplotlib.use('Agg')
+
 # Forza il backend non-interattivo
 matplotlib.use('Agg')
 
@@ -114,18 +118,8 @@ def plot_confusion_matrix(all_labels, all_preds, class_names, mode, save_dir="pl
     filename = Path(save_dir) / f"cm_{mode}.png"
     plt.savefig(filename, bbox_inches='tight', dpi=300)
     plt.close()
-    print(f"✅ Matrice di Confusione salvata: {filename}")import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import torch
-import matplotlib
-from sklearn.manifold import TSNE
-from sklearn.metrics import confusion_matrix
-from tqdm import tqdm
-from pathlib import Path
+    print(f"✅ Matrice di Confusione salvata: {filename}")
 
-# Forza il backend non-interattivo
-matplotlib.use('Agg')
 
 def extract_features_stratified(model, loader, device, samples_per_class=300, num_classes=10):
     """

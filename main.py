@@ -28,28 +28,16 @@ from src.models import SimCLR
 import warnings
 warnings.filterwarnings("ignore")
 
-class_names= ["backdoor", 
-    "ddos", 
-    "dos", 
-    "injection", 
-    "mitm", 
-    "normal", 
-    "password", 
-    "scanning", 
-    "vulnerability", 
-    "xss"]
-
+class_names = ["Benign", "Bot", "DDOS attack-HOIC", "DDoS attacks-LOIC-HTTP", "DoS attacks-GoldenEye", "DoS attacks-Hulk", "DoS attacks-SlowHTTPTest", "DoS attacks-Slowloris", "FTP-BruteForce", "Infilteration", "SSH-Bruteforce"]
 # --- UTILS: BILANCIAMENTO DINAMICO ---
 def compute_class_weights(dataset, device):
     labels = np.array(dataset.labels)
-    num_classes = len(dataset.class_names)
-    class_counts = np.bincount(labels, minlength=num_classes)
-    class_counts = np.where(class_counts == 0, 1, class_counts)
-
-    # Calcolo logaritmico: riduce il divario tra pesi minimi e massimi
-    weights = np.log(len(labels)) / np.log(class_counts)
+    class_counts = np.bincount(labels)
     
-    # Normalizzazione per far sì che il peso medio sia 1.0
+    # Formula logaritmica: attenua lo sbilanciamento
+    weights = np.log(len(labels)) / np.log(class_counts + 1)
+    
+    # Normalizzazione: la media dei pesi deve essere 1.0
     weights = weights / weights.mean()
     
     return torch.tensor(weights, dtype=torch.float).to(device)
