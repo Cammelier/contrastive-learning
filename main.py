@@ -28,7 +28,7 @@ from src.models import SimCLR
 import warnings
 warnings.filterwarnings("ignore")
 
-class_names = ["Benign", "Bot", "DDOS attack-HOIC", "DDoS attacks-LOIC-HTTP", "DoS attacks-GoldenEye", "DoS attacks-Hulk", "DoS attacks-SlowHTTPTest", "DoS attacks-Slowloris", "FTP-BruteForce", "Infilteration", "SSH-Bruteforce"]
+class_names = ["Benign", "backdoor", "ddos", "dos", "injection", "mitm", "password", "ransomware", "scanning", "xss"]
 # --- UTILS: BILANCIAMENTO DINAMICO ---
 def compute_class_weights(dataset, device):
     labels = np.array(dataset.labels)
@@ -215,7 +215,35 @@ def run_fine_tuning(cfg, device, model, ckpt_dir, _):
         acc = correct / total
         wandb.log({'ft/loss': avg_loss, 'ft/acc': acc, 'ft/epoch': epoch+1})
         print(f"Ep {epoch+1}: Loss {avg_loss:.4f}, Acc {acc:.3f}")
+        
+    # --- AGGIUNTO: SALVATAGGIO CHECKPOINT FINE-TUNED ---
+    torch.save({
+        'encoder': model.state_dict(), 
+        'classifier': model.classifier.state_dict(),
+        'class_names': [str(c) for c in dataset.class_names]
+    }, ckpt_dir / 'best_finetuned.pth')
     
+    print(f"✅ Checkpoint Fine-Tuning salvato in: {ckpt_dir / 'best_finetuned.pth'}")
+    
+def run_testing(cfg, device, model, ckpt_dir, mode='linear_probe'):
+    test_loader, dataset, _ = prepare_loader(cfg, 'test')
+    ckpt_path = ckpt_dir / ('best_linear_probe.pth' if mode == 'linear_probe' else 'best_finetuned.pth')
+    if not ckpt_path.exists(): return
+
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(checkpoint['encoder'], strict=False)
+    model.classifier = nn.Linear(cfg.model.hidden_dim, len(dataset.class_names)).to(device)
+    model.classifier.load_state_dict(checkpoint['classifier'])
+    
+    model.eval()
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for (x_num, x_cat), labels in tqdm(test_loader, desc=f"Testing {mode}"):
+            features, _ = model((x_num.to(device), x_cat.to(device)))
+            all_preds.extend(model.classifier(features).argmax(1).cpu().numpy())
+            all_labels.extend(labels.numpy())
+            
+    print(f"\n📊 Report {mode}:\n", classification_report(all_labels, all_preds, target_names=[str(c) for c in dataset.class_names]))
 
 
 @hydra.main(version_base="1.2", config_path="config", config_name="config")
